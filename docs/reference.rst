@@ -603,6 +603,9 @@ Automatic differentiation
 
 .. autofunction:: custom
 
+.. autofunction:: from_torch
+.. autofunction:: to_torch
+
 Concrete array classes
 ----------------------
 
