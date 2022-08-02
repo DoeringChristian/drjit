@@ -9,7 +9,7 @@ if os.name == 'nt':
     d = __file__
     for i in range(3):
         d = os.path.dirname(d)
-    try: # try to use Python 3.8's DLL handling
+    try:  # try to use Python 3.8's DLL handling
         os.add_dll_directory(d)
     except AttributeError:  # otherwise use PATH
         os.environ['PATH'] += os.pathsep + d
@@ -18,7 +18,7 @@ if os.name == 'nt':
 del sys, os
 
 # Implementation details accessed by both C++ and Python
-import drjit.detail as detail # noqa
+import drjit.detail as detail  # noqa
 
 # Native extension defining low-level arrays
 import drjit.drjit_ext as drjit_ext  # noqa
@@ -36,10 +36,13 @@ import drjit.traits as traits  # noqa
 import drjit.const as const  # noqa
 
 # Matrix-related functions
-import drjit.matrix as matrix # noqa
+import drjit.matrix as matrix  # noqa
 
 # Tensor-related functions
-import drjit.tensor as tensor # noqa
+import drjit.tensor as tensor  # noqa
+
+# Torch related functions
+import drjit.torch as torch  # noqa
 
 # Install routing functions in ArrayBase and global scope
 self = vars()
@@ -86,6 +89,12 @@ for k, v in matrix.__dict__.items():
 # Install tensor-related functions
 for k, v in tensor.__dict__.items():
     if k.startswith('_') or k[0].isupper():
+        continue
+    self[k] = v
+
+# Install torch-related functions
+for k, v in torch.__dict__.item():
+    if k.startwith('_') or k[0].isupper():
         continue
     self[k] = v
 
