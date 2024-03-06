@@ -9,7 +9,7 @@ configure_file(
   ${CMAKE_BINARY_DIR}/drjit/config.py
 )
 
-set(PY_FILES __init__.py ast.py config.py detail.py interop.py llvm/ad.py cuda/ad.py)
+set(PY_FILES __init__.py ast.py detail.py interop.py llvm/ad.py cuda/ad.py)
 set(PY_FILES_OUT "${CMAKE_BINARY_DIR}/drjit/config.py")
 foreach(PY_FILE IN LISTS PY_FILES)
   set(IN_FILE "${CMAKE_SOURCE_DIR}/drjit/${PY_FILE}")
