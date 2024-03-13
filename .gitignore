@@ -8,6 +8,7 @@ CTestTestfile.cmake
 CPackConfig.cmake
 CPackSourceConfig.cmake
 Makefile
+compile_commands.json
 
 # Ninja
 .ninja_deps
@@ -24,6 +25,7 @@ Makefile
 *.dSYM
 __pycache__
 *.pyc
+.cache
 
 # Visual Studio
 *.vcxproj
