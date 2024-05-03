@@ -22,6 +22,7 @@
 #include "cuda.h"
 #include "reduce.h"
 #include "eval.h"
+#include "freeze.h"
 #include "iter.h"
 #include "init.h"
 #include "memop.h"
@@ -233,6 +234,7 @@ NB_MODULE(_drjit_ext, m_) {
     export_iter(detail);
     export_reduce(m);
     export_eval(m);
+    export_freeze(m);
     export_memop(m);
     export_slice(m);
     export_dlpack(m);
