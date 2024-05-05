@@ -11,6 +11,7 @@
 #pragma once
 
 #include "common.h"
+#include "functional"
 
-extern void freeze(nb::handle);
+extern nb::object freeze(nb::callable);
 extern void export_freeze(nb::module_ &);
