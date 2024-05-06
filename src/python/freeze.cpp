@@ -183,7 +183,7 @@ struct FlatVariables {
     }
 
     nb::object construct() {
-        Layout &layout = this->layout[layout_index];
+        Layout &layout = this->layout[layout_index++];
         if (is_drjit_type(layout.type)) {
             const ArraySupplement &s = supp(layout.type);
 
@@ -191,15 +191,52 @@ struct FlatVariables {
                 auto result = init_from_index(layout.type,
                                               this->variables[variable_index]);
                 variable_index++;
-                layout_index++;
                 return result;
+            } else if (s.ndim > 1) {
+                nb::raise("FlatVariables::construct(): dynamic sized Dr.Jit "
+                          "variables are not yet supported.");
+
             } else {
                 uint32_t index = this->variables[variable_index];
-                jit_log(LogLevel::Info, "construct(): Variable index: %u", index);
+                jit_log(LogLevel::Info, "construct(): Variable index: %u",
+                        index);
                 auto result = init_from_index(layout.type, index);
                 variable_index++;
-                layout_index++;
                 return result;
+            }
+        } else if (layout.type.is(&PyTuple_Type)) {
+            nb::list list;
+            for (uint32_t i = 0; i < layout.num; ++i) {
+                list.append(construct());
+            }
+            return nb::tuple(list);
+        } else if (layout.type.is(&PyList_Type)) {
+            nb::list list;
+            for (uint32_t i = 0; i < layout.num; ++i) {
+                list.append(construct());
+            }
+            return list;
+        } else if (layout.type.is(&PyDict_Type)) {
+            nb::dict dict;
+            for (auto k : layout.fields) {
+                dict[k] = construct();
+            }
+            return dict;
+        } else {
+            if (nb::dict ds = get_drjit_struct(layout.type); ds.is_valid()) {
+                nb::object tmp = layout.type();
+                // TODO: validation against `ds`
+                for (auto k : layout.fields) {
+                    nb::setattr(tmp, k, construct());
+                }
+                return tmp;
+            } else if (nb::object df = get_dataclass_fields(layout.type);
+                       df.is_valid()) {
+                nb::object tmp = layout.type();
+                for (auto k : layout.fields) {
+                    nb::setattr(tmp, k, construct());
+                }
+                return tmp;
             }
         }
         nb::raise("FlatVariables::construct(): could not reconstruct "
@@ -221,7 +258,7 @@ struct FrozenFunction {
         FlatVariables in_variables;
         in_variables.traverse(args);
 
-        for(uint32_t index: in_variables.variables){
+        for (uint32_t index : in_variables.variables) {
             jit_var_schedule(index);
         }
         jit_eval();
@@ -244,7 +281,7 @@ struct FrozenFunction {
             }
 
             // Eval output variables
-            for (uint32_t index: out_variables.variables){
+            for (uint32_t index : out_variables.variables) {
                 jit_var_schedule(index);
             }
             jit_eval();
@@ -259,7 +296,7 @@ struct FrozenFunction {
                               out_variables.variables.data());
             jit_log(LogLevel::Info, "Replaying done:");
             jit_log(LogLevel::Info, "o0: %u", out_variables.variables[0]);
-            
+
             out_variables.layout_index = 0;
             out_variables.variable_index = 0;
             auto result = out_variables.construct();
