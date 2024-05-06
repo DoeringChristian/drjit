@@ -157,14 +157,10 @@ def test06_dataclass(t):
     class Point:
         x: t
         y: t
-        def __init__(self):
-            ...
 
     @dr.freeze
     def func(x):
-        p = Point()
-        p.x = x+1
-        p.y = x+2
+        p = Point(x+1, x+2)
         return p
 
     i0 = t(0, 1, 2)
