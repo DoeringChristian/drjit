@@ -241,11 +241,11 @@ struct FlatVariables {
                 return tmp;
             } else if (nb::object df = get_dataclass_fields(layout.type);
                        df.is_valid()) {
-                nb::object tmp = layout.type();
+                nb::dict dict;
                 for (auto k : layout.fields) {
-                    nb::setattr(tmp, k, construct());
+                    dict[k] = construct();
                 }
-                return tmp;
+                return layout.type(**dict);
             }
         }
         nb::raise("FlatVariables::construct(): could not reconstruct "
