@@ -13,6 +13,9 @@ static const char *doc_freeze = R"(
     
 )";
 
+/// Stores information about python objects, such as their type, their number of
+/// sub-elements or their field keys. This can be used to reconstruct a pytree
+/// from a flattened variable array.
 struct Layout {
     nb::type_object type;
     // TODO: unionize
@@ -31,9 +34,15 @@ nb::object init_from_index(nb::type_object type, uint32_t variable_index) {
 
 struct FlatVariables {
 
+    // Variables, used to iterate over the variables/layouts when constructing
+    // python objects
     uint32_t variable_index = 0;
     uint32_t layout_index = 0;
+
+    /// The flattened variable indices of the input/output to a frozen function
     std::vector<uint32_t> variables;
+    /// This saves information about the type, size and fields of pytree objects.
+    /// The information is stored in DFS order.
     std::vector<Layout> layout;
     JitBackend backend = JitBackend::None;
 
