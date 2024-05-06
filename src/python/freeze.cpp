@@ -5,33 +5,52 @@
 #include "common.h"
 #include "drjit-core/jit.h"
 #include "listobject.h"
+#include "pyerrors.h"
 #include "tupleobject.h"
-#include<vector>
+#include <vector>
 
 static const char *doc_freeze = R"(
     
 )";
 
-struct Layout{
-    nb::object type;
+struct Layout {
+    nb::type_object type;
     // TODO: unionize
     size_t num = 0;
     std::vector<nb::object> fields;
 };
 
-struct FlatVariables{
-    
+nb::object init_from_index(nb::type_object type, uint32_t variable_index) {
+    jit_log(LogLevel::Info, "init_from_index():");
+    jit_log(LogLevel::Info, "%s", jit_var_str(variable_index));
+    auto result = nb::inst_alloc_zero(type);
+    const ArraySupplement &s = supp(result.type());
+    s.init_index(variable_index, inst_ptr(result));
+    return result;
+}
+
+struct FlatVariables {
+
+    uint32_t variable_index = 0;
+    uint32_t layout_index = 0;
     std::vector<uint32_t> variables;
     std::vector<Layout> layout;
     JitBackend backend = JitBackend::None;
 
-    void collect(nb::handle h){
+    void clear() {
+        this->variable_index = 0;
+        this->layout_index = 0;
+        this->variables.clear();
+        this->layout.clear();
+        this->backend = JitBackend::None;
+    }
+
+    void collect(nb::handle h) {
         auto s = supp(h.type());
 
         JitBackend var_backend = (JitBackend)s.backend;
 
         if (this->backend == var_backend || this->backend == JitBackend::None) {
-            jit_log(LogLevel::Info, "backend: %u", (uint32_t)var_backend);
             this->backend = var_backend;
         } else {
             jit_fail("freeze(): backend missmatch error (backend of this "
@@ -43,92 +62,107 @@ struct FlatVariables{
             variables.push_back(s.index(inst_ptr(h)));
     }
 
-    void traverse(nb::handle h){
+    void traverse(nb::handle h) {
         nb::handle tp = h.type();
 
         try {
             if (is_drjit_type(tp)) {
                 const ArraySupplement &s = supp(tp);
                 if (s.is_tensor) {
+                    Layout layout;
+                    layout.type = nb::borrow<nb::type_object>(tp);
+                    this->layout.push_back(layout);
+
                     collect(h);
                 } else if (s.ndim > 1) {
                     Py_ssize_t len = s.shape[0];
                     if (len == DRJIT_DYNAMIC)
                         len = s.len(inst_ptr(h));
 
+                    Layout layout;
+                    layout.type = nb::borrow<nb::type_object>(tp);
+                    layout.num = len;
+                    this->layout.push_back(layout);
+
                     for (Py_ssize_t i = 0; i < len; ++i)
                         traverse(nb::steal(s.item(h.ptr(), i)));
-                } else{
+                } else {
+                    Layout layout;
+                    layout.type = nb::borrow<nb::type_object>(tp);
+                    this->layout.push_back(layout);
+
                     collect(h);
                 }
-            } else if (tp.is(&PyTuple_Type)){
+            } else if (tp.is(&PyTuple_Type)) {
                 nb::tuple tuple = nb::borrow<nb::tuple>(h);
-                
+
                 Layout layout;
-                layout.type = nb::borrow(tp);
+                layout.type = nb::borrow<nb::type_object>(tp);
                 layout.num = tuple.size();
                 this->layout.push_back(layout);
-                
-                for (nb::handle h2: tuple){
+
+                for (nb::handle h2 : tuple) {
                     traverse(h2);
                 }
-            } else if (tp.is(&PyList_Type)){
+            } else if (tp.is(&PyList_Type)) {
                 nb::list list = nb::borrow<nb::list>(h);
-                
+
                 Layout layout;
-                layout.type = nb::borrow(tp);
+                layout.type = nb::borrow<nb::type_object>(tp);
                 layout.num = list.size();
                 this->layout.push_back(layout);
-                
-                for (nb::handle h2: list){
+
+                for (nb::handle h2 : list) {
                     traverse(h2);
                 }
             } else if (tp.is(&PyDict_Type)) {
                 nb::dict dict = nb::borrow<nb::dict>(h);
 
                 Layout layout;
-                layout.type = nb::borrow(tp);
+                layout.type = nb::borrow<nb::type_object>(tp);
                 layout.num = dict.size();
                 layout.fields.reserve(layout.num);
-                for (auto k: dict.keys()){
+                for (auto k : dict.keys()) {
                     layout.fields.push_back(nb::borrow(k));
                 }
                 this->layout.push_back(layout);
-                
-                for (auto [k, v] : dict){
+
+                for (auto [k, v] : dict) {
                     traverse(v);
                 }
-            } else{
-                if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()){
-                    
+            } else {
+                if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()) {
+
                     Layout layout;
-                    layout.type = nb::borrow(tp);
+                    layout.type = nb::borrow<nb::type_object>(tp);
                     layout.num = ds.size();
                     layout.fields.reserve(layout.num);
-                    for (auto k: ds.keys()){
+                    for (auto k : ds.keys()) {
                         layout.fields.push_back(nb::borrow(k));
                     }
                     this->layout.push_back(layout);
-                    
-                    for (auto [k, v] : ds){
+
+                    for (auto [k, v] : ds) {
                         traverse(nb::getattr(h, k));
                     }
-                } else if (nb::object df = get_dataclass_fields(tp); df.is_valid()){
-                    
+                } else if (nb::object df = get_dataclass_fields(tp);
+                           df.is_valid()) {
+
                     Layout layout;
-                    layout.type = nb::borrow(tp);
-                    for (auto field: df){
+                    layout.type = nb::borrow<nb::type_object>(tp);
+                    for (auto field : df) {
                         nb::object k = field.attr(DR_STR(name));
                         layout.fields.push_back(nb::borrow(k));
                     }
                     layout.num = layout.fields.size();
                     this->layout.push_back(layout);
-                    
-                    for (nb::handle field: df){
+
+                    for (nb::handle field : df) {
                         nb::object k = field.attr(DR_STR(name));
                         traverse(nb::getattr(h, k));
                     }
-                } else if (nb::object cb = get_traverse_cb_ro(tp); cb.is_valid()){
+                } else if (nb::object cb = get_traverse_cb_ro(tp);
+                           cb.is_valid()) {
                     // TODO: traverse callback
                 }
             }
@@ -147,39 +181,100 @@ struct FlatVariables{
             nb::raise_python_error();
         }
     }
+
+    nb::object construct() {
+        Layout &layout = this->layout[layout_index];
+        if (is_drjit_type(layout.type)) {
+            const ArraySupplement &s = supp(layout.type);
+
+            if (s.is_tensor) {
+                auto result = init_from_index(layout.type,
+                                              this->variables[variable_index]);
+                variable_index++;
+                layout_index++;
+                return result;
+            } else {
+                uint32_t index = this->variables[variable_index];
+                jit_log(LogLevel::Info, "construct(): Variable index: %u", index);
+                auto result = init_from_index(layout.type, index);
+                variable_index++;
+                layout_index++;
+                return result;
+            }
+        }
+        nb::raise("FlatVariables::construct(): could not reconstruct "
+                  "output variable of type %U",
+                  nb::type_name(layout.type).ptr());
+    }
 };
 
-nb::object freeze(nb::callable func){
-    
-    auto new_func = nb::cpp_function([func](nb::args args) {
+struct FrozenFunction {
+    Recording *recording = nullptr;
+    FlatVariables out_variables;
+    nb::callable func;
+
+    FrozenFunction(nb::callable func) : func(func) {
+    }
+
+    nb::object operator()(nb::args args) {
 
         FlatVariables in_variables;
         in_variables.traverse(args);
-        
+
+        for(uint32_t index: in_variables.variables){
+            jit_var_schedule(index);
+        }
+        jit_eval();
+
         JitBackend backend = in_variables.backend;
 
-        jit_record_start(backend, in_variables.variables.data(), in_variables.variables.size());
+        if (recording == nullptr) {
+            jit_log(LogLevel::Info, "Recording:");
+            jit_record_start(backend, in_variables.variables.data(),
+                             in_variables.variables.size());
 
-        auto result = func(*args);
-        
-        FlatVariables out_variables;
-        out_variables.traverse(result);
-        if(out_variables.backend != backend){
-            jit_fail("freeze(): backend missmatch error (backend %u of output "
-                     "variables did not match backend %u of input variables)",
-                     (uint32_t)out_variables.backend, (uint32_t)backend);
+            auto result = func(*args);
+            out_variables.traverse(result);
+            if (out_variables.backend != backend) {
+                jit_fail("freeze(): backend missmatch error (backend %u of "
+                         "output "
+                         "variables did not match backend %u of input "
+                         "variables)",
+                         (uint32_t)out_variables.backend, (uint32_t)backend);
+            }
+
+            // Eval output variables
+            for (uint32_t index: out_variables.variables){
+                jit_var_schedule(index);
+            }
+            jit_eval();
+
+            recording = jit_record_stop(backend, out_variables.variables.data(),
+                                        out_variables.variables.size());
+
+            return result;
+        } else {
+            jit_log(LogLevel::Info, "Replaying:");
+            jit_record_replay(recording, in_variables.variables.data(),
+                              out_variables.variables.data());
+            jit_log(LogLevel::Info, "Replaying done:");
+            jit_log(LogLevel::Info, "o0: %u", out_variables.variables[0]);
+            
+            out_variables.layout_index = 0;
+            out_variables.variable_index = 0;
+            auto result = out_variables.construct();
+            return result;
         }
+    }
+};
 
-        Recording *record = jit_record_stop(backend, out_variables.variables.data(), out_variables.variables.size());
-
-        jit_record_destroy(record);
-        
-        return result;
-    });
-
-    return new_func;
+FrozenFunction freeze(nb::callable func) {
+    FrozenFunction frozen(func);
+    return frozen;
 }
 
-void export_freeze(nb::module_ &m){
+void export_freeze(nb::module_ &m) {
     m.def("freeze", &freeze, doc_freeze);
+    nb::class_<FrozenFunction>(m, "FrozenFunction")
+        .def("__call__", &FrozenFunction::operator());
 }
