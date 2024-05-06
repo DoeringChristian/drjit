@@ -11,6 +11,12 @@ def test01_basic(t):
 
     i0 = t(0, 1, 2)
     i1 = t(2, 1, 0)
+    
     o0 = func(i0, i1)
-
     assert dr.all(t(2, 2, 2) ==  o0)
+    
+    i0 = t(1, 2, 3)
+    i1 = t(3, 2, 1)
+    
+    o0 = func(i0, i1)
+    assert dr.all(t(4, 4, 4) ==  o0)
