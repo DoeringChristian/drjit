@@ -13,5 +13,7 @@
 #include "common.h"
 #include "functional"
 
-extern nb::object freeze(nb::callable);
+struct FrozenFunction;
+
+extern FrozenFunction freeze(nb::callable);
 extern void export_freeze(nb::module_ &);
