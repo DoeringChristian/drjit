@@ -27,7 +27,7 @@ nb::object init_from_index(nb::type_object type, uint32_t variable_index) {
     auto result = nb::inst_alloc_zero(type);
     const ArraySupplement &s = supp(result.type());
     s.init_index(variable_index, inst_ptr(result));
-    
+
     // Decrement index as `init_index` is borrowing
     jit_var_dec_ref(variable_index);
     return result;
@@ -42,8 +42,8 @@ struct FlatVariables {
 
     /// The flattened variable indices of the input/output to a frozen function
     std::vector<uint32_t> variables;
-    /// This saves information about the type, size and fields of pytree objects.
-    /// The information is stored in DFS order.
+    /// This saves information about the type, size and fields of pytree
+    /// objects. The information is stored in DFS order.
     std::vector<Layout> layout;
     JitBackend backend = JitBackend::None;
 
@@ -68,8 +68,15 @@ struct FlatVariables {
                      (uint32_t)var_backend, (uint32_t)this->backend);
         }
 
-        if (s.index){
+        if (s.index) {
             uint32_t index = s.index(inst_ptr(h));
+            uint32_t rc = jit_var_ref(index);
+            if (rc > 1) {
+                jit_fail("FlatVariables::collect(): Unsupported refcount (rc "
+                         "<= 1 but was %u) ",
+                         rc);
+            }
+            jit_log(LogLevel::Info, "rc: %u", jit_var_ref(index));
             variables.push_back(index);
         }
     }
