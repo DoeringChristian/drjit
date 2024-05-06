@@ -24,11 +24,12 @@ struct Layout {
 };
 
 nb::object init_from_index(nb::type_object type, uint32_t variable_index) {
-    jit_log(LogLevel::Info, "init_from_index():");
-    jit_log(LogLevel::Info, "%s", jit_var_str(variable_index));
     auto result = nb::inst_alloc_zero(type);
     const ArraySupplement &s = supp(result.type());
     s.init_index(variable_index, inst_ptr(result));
+    
+    // Decrement index as `init_index` is borrowing
+    jit_var_dec_ref(variable_index);
     return result;
 }
 
@@ -67,8 +68,10 @@ struct FlatVariables {
                      (uint32_t)var_backend, (uint32_t)this->backend);
         }
 
-        if (s.index)
-            variables.push_back(s.index(inst_ptr(h)));
+        if (s.index){
+            uint32_t index = s.index(inst_ptr(h));
+            variables.push_back(index);
+        }
     }
 
     void traverse(nb::handle h) {
