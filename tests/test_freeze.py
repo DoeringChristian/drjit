@@ -224,3 +224,17 @@ def test08_optimization(t):
     print(f"{ref=}")
 
     
+# @pytest.test_arrays("uint32, jit, shape=(*)")
+# def test09_no_input(t):
+#     dr.set_log_level(dr.LogLevel.Info)
+#     
+#     @dr.freeze
+#     def func():
+#         return dr.arange(t, 3)
+#
+#     x = func()
+#     assert dr.all(t(0, 1, 2) == x)
+#
+#     x = func()
+#     print(f"{x=}")
+#     # assert dr.all(t(0, 1, 2) == x)
