@@ -1,9 +1,11 @@
 
 #include "freeze.h"
 #include "apply.h"
+#include "autodiff.h"
 #include "base.h"
 #include "common.h"
 #include "drjit-core/jit.h"
+#include "drjit/extra.h"
 #include "listobject.h"
 #include "pyerrors.h"
 #include "tupleobject.h"
@@ -63,22 +65,25 @@ struct FlatVariables {
         if (this->backend == var_backend || this->backend == JitBackend::None) {
             this->backend = var_backend;
         } else {
-            jit_fail("freeze(): backend missmatch error (backend of this "
-                     "variable %u does not match backend of others %u)!",
-                     (uint32_t)var_backend, (uint32_t)this->backend);
+            nb::raise("freeze(): backend missmatch error (backend of this "
+                      "variable %u does not match backend of others %u)!",
+                      (uint32_t)var_backend, (uint32_t)this->backend);
         }
+        raise_if(s.index == nullptr, "ArraySupplement index function "
+                                     "pointer is nullptr.");
 
-        if (s.index) {
-            uint32_t index = s.index(inst_ptr(h));
-            uint32_t rc = jit_var_ref(index);
-            if (rc > 1) {
-                index = jit_var_copy(index);
-                s.reset_index(index, inst_ptr(h));
-                jit_var_dec_ref(index);
-            }
-            jit_log(LogLevel::Info, "rc: %u", jit_var_ref(index));
-            variables.push_back(index);
+        uint64_t index = s.index(inst_ptr(h));
+
+        raise_if(ad_grad_enabled(index), "Passing gradients into/out of a "
+                                         "frozen function is not supported!");
+
+        uint32_t rc = jit_var_ref(index);
+        if (rc > 1) {
+            index = jit_var_copy(index);
+            s.reset_index(index, inst_ptr(h));
+            jit_var_dec_ref(index);
         }
+        variables.push_back(index);
     }
 
     void traverse(nb::handle h) {
@@ -291,15 +296,15 @@ struct FrozenFunction {
 
             auto result = func(*args);
             out_variables.traverse(result);
-            if ((out_variables.variables.size() > 0 &&
-                 in_variables.variables.size() > 0) &&
-                out_variables.backend != backend) {
-                jit_fail("freeze(): backend missmatch error (backend %u of "
-                         "output "
-                         "variables did not match backend %u of input "
-                         "variables)",
-                         (uint32_t)out_variables.backend, (uint32_t)backend);
-            }
+            
+            raise_if((out_variables.variables.size() > 0 &&
+                      in_variables.variables.size() > 0) &&
+                         out_variables.backend != backend,
+                     "freeze(): backend missmatch error (backend %u of "
+                     "output "
+                     "variables did not match backend %u of input "
+                     "variables)",
+                     (uint32_t)out_variables.backend, (uint32_t)backend);
 
             // Eval output variables
             for (uint32_t index : out_variables.variables) {
