@@ -225,8 +225,6 @@ struct FlatVariables {
 
             } else {
                 uint32_t index = this->variables[variable_index];
-                jit_log(LogLevel::Info, "construct(): Variable index: %u",
-                        index);
                 auto result = init_from_index(layout.type, index);
                 variable_index++;
                 return result;
@@ -290,6 +288,10 @@ struct FrozenFunction {
         }
         jit_eval();
 
+        raise_if(in_variables.variables.size() == 0,
+                 "freeze(): Cannot infer backend without providing input "
+                 "variable to frozen functin!");
+
         JitBackend backend = in_variables.backend;
 
         if (recording == nullptr) {
@@ -317,6 +319,7 @@ struct FrozenFunction {
 
             recording = jit_record_stop(backend, out_variables.variables.data(),
                                         out_variables.variables.size());
+            jit_log(LogLevel::Info, "Recording done");
 
             return result;
         } else {
