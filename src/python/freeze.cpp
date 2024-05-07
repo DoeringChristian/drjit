@@ -207,6 +207,9 @@ struct FlatVariables {
     }
 
     nb::object construct() {
+        if (this->variables.size() == 0){
+            return nb::none();
+        }
         Layout &layout = this->layout[layout_index++];
         if (is_drjit_type(layout.type)) {
             const ArraySupplement &s = supp(layout.type);
@@ -321,7 +324,6 @@ struct FrozenFunction {
             jit_record_replay(recording, in_variables.variables.data(),
                               out_variables.variables.data());
             jit_log(LogLevel::Info, "Replaying done:");
-            jit_log(LogLevel::Info, "o0: %u", out_variables.variables[0]);
 
             out_variables.layout_index = 0;
             out_variables.variable_index = 0;
