@@ -128,8 +128,8 @@ def test06_drjit_struct(t):
     @dr.freeze
     def func(x):
         p = Point()
-        p.x = x+1
-        p.y = x+2
+        p.x = x + 1
+        p.y = x + 2
         return p
 
     i0 = t(0, 1, 2)
@@ -139,7 +139,7 @@ def test06_drjit_struct(t):
     o1 = o.y
     assert dr.all(t(1, 2, 3) == o0)
     assert dr.all(t(2, 3, 4) == o1)
-    
+
     i0 = t(1, 2, 3)
 
     o = func(i0)
@@ -147,8 +147,8 @@ def test06_drjit_struct(t):
     o1 = o.y
     assert dr.all(t(2, 3, 4) == o0)
     assert dr.all(t(3, 4, 5) == o1)
-    
-    
+
+
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test06_dataclass(t):
     dr.set_log_level(dr.LogLevel.Info)
@@ -160,7 +160,7 @@ def test06_dataclass(t):
 
     @dr.freeze
     def func(x):
-        p = Point(x+1, x+2)
+        p = Point(x + 1, x + 2)
         return p
 
     i0 = t(0, 1, 2)
@@ -170,7 +170,7 @@ def test06_dataclass(t):
     o1 = o.y
     assert dr.all(t(1, 2, 3) == o0)
     assert dr.all(t(2, 3, 4) == o1)
-    
+
     i0 = t(1, 2, 3)
 
     o = func(i0)
@@ -178,3 +178,17 @@ def test06_dataclass(t):
     o1 = o.y
     assert dr.all(t(2, 3, 4) == o0)
     assert dr.all(t(3, 4, 5) == o1)
+
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test07_scatter(t):
+    dr.set_log_level(dr.LogLevel.Info)
+
+    @dr.freeze
+    def func(x):
+        dr.scatter(x, 1, dr.arange(t, 3))
+
+    i0 = t(0, 1, 2)
+
+    func(i0)
+    assert dr.all(t(1, 1, 1) == i0)
