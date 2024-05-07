@@ -72,9 +72,9 @@ struct FlatVariables {
             uint32_t index = s.index(inst_ptr(h));
             uint32_t rc = jit_var_ref(index);
             if (rc > 1) {
-                jit_fail("FlatVariables::collect(): Unsupported refcount (rc "
-                         "<= 1 but was %u) ",
-                         rc);
+                index = jit_var_copy(index);
+                s.reset_index(index, inst_ptr(h));
+                jit_var_dec_ref(index);
             }
             jit_log(LogLevel::Info, "rc: %u", jit_var_ref(index));
             variables.push_back(index);

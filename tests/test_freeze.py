@@ -186,9 +186,20 @@ def test07_scatter(t):
 
     @dr.freeze
     def func(x):
-        dr.scatter(x, 1, dr.arange(t, 3))
+        dr.scatter(x, 0, dr.arange(t, 3))
+        return x + 1
 
-    i0 = t(0, 1, 2)
-
-    func(i0)
-    assert dr.all(t(1, 1, 1) == i0)
+    x = t(0, 1, 2)
+    func(x)
+    
+    x = t(0, 1, 2)
+    y = x + 1
+    z = x
+    w = t(x)
+    
+    func(x)
+    
+    assert dr.all(t(0, 0, 0) == x)
+    assert dr.all(t(1, 2, 3) == y)
+    assert dr.all(t(0, 0, 0) == z)
+    assert dr.all(t(0, 1, 2) == w)
