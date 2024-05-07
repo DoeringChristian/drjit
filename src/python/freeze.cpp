@@ -291,7 +291,9 @@ struct FrozenFunction {
 
             auto result = func(*args);
             out_variables.traverse(result);
-            if (out_variables.backend != backend) {
+            if ((out_variables.variables.size() > 0 &&
+                 in_variables.variables.size() > 0) &&
+                out_variables.backend != backend) {
                 jit_fail("freeze(): backend missmatch error (backend %u of "
                          "output "
                          "variables did not match backend %u of input "
