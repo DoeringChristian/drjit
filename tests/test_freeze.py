@@ -190,19 +190,20 @@ def test07_scatter(t):
 
     x = t(0, 1, 2)
     func(x)
-    
+
     x = t(0, 1, 2)
     y = x + 1
     z = x
     w = t(x)
-    
+
     func(x)
-    
+
     assert dr.all(t(0, 0, 0) == x)
     assert dr.all(t(1, 2, 3) == y)
     assert dr.all(t(0, 0, 0) == z)
     assert dr.all(t(0, 1, 2) == w)
-    
+
+
 @pytest.test_arrays("float32, is_diff, shape=(*)")
 def test08_optimization(t):
     dr.set_log_level(dr.LogLevel.Info)
@@ -211,7 +212,7 @@ def test08_optimization(t):
     def func(x, ref):
         dr.enable_grad(x)
         loss = dr.mean(dr.square(x - ref))
-        
+
         dr.backward(loss)
 
         dr.scatter(x, x - dr.grad(x), dr.arange(t, 4))
@@ -222,3 +223,25 @@ def test08_optimization(t):
 
     assert dr.allclose(t(0.5, 0.5, 0.5, 0.5), x)
 
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test09_resized(t):
+    dr.set_log_level(dr.LogLevel.Info)
+
+    @dr.freeze
+    def func(x, y):
+        return x + y
+
+    i0 = t(0, 1, 2)
+    i1 = t(2, 1, 0)
+
+    o0 = func(i0, i1)
+    assert dr.all(t(2, 2, 2) == o0)
+
+    i0 = dr.arange(t, 64)
+    i1 = dr.arange(t, 64)
+    r0 = i0 + i1
+    dr.eval(i0, i1, r0)
+
+    o0 = func(i0, i1)
+    assert dr.all(r0 == o0)
