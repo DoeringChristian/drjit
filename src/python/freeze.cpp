@@ -304,6 +304,7 @@ void assign(nb::handle dst, nb::handle src) {
                 assign(dst[i], src[i]);
             }
         } else {
+            s.reset_index(s.index(inst_ptr(src)), inst_ptr(dst));
         }
     } else if (src_tp.is(&PyTuple_Type)) {
         nb::tuple src_tuple = nb::borrow<nb::tuple>(src);
