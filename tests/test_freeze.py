@@ -193,21 +193,28 @@ def test07_scatter(t):
 @pytest.test_arrays("float32, is_diff, shape=(*)")
 def test08_optimization(t):
     @dr.freeze
-    def func(x, ref):
-        dr.enable_grad(x)
-        loss = dr.mean(dr.square(x - ref))
+    def func(state, ref):
+        for k, x in state.items():
+            dr.enable_grad(x)
+            loss = dr.mean(dr.square(x - ref))
 
-        dr.backward(loss)
+            dr.backward(loss)
 
-        dr.scatter(x, x - dr.grad(x), dr.arange(t, 4))
+            grad = dr.grad(x)
+            dr.disable_grad(x)
+            state[k] = x - grad
 
-        dr.disable_grad(x)
+    state = {"x": t(0, 0, 0, 0)}
 
-    x = t(0, 0, 0, 0)
     ref = t(1, 1, 1, 1)
-    func(x, ref)
+    func(state, ref)
+    assert dr.allclose(t(0.5, 0.5, 0.5, 0.5), state["x"])
 
-    assert dr.allclose(t(0.5, 0.5, 0.5, 0.5), x)
+    state = {"x": t(0, 0, 0, 0)}
+    ref = t(1, 1, 1, 1)
+    func(state, ref)
+
+    assert dr.allclose(t(0.5, 0.5, 0.5, 0.5), state["x"])
 
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
@@ -232,7 +239,7 @@ def test09_resized(t):
 
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
-def test10_changed_input(t):
+def test10_changed_input_dict(t):
     @dr.freeze
     def func(d: dict):
         d["y"] = d["x"] + 1
@@ -248,3 +255,24 @@ def test10_changed_input(t):
 
     func(d)
     assert dr.all(t(2, 3, 4) == d["y"])
+
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test11_changed_input_dataclass(t):
+    @dataclass
+    class Point:
+        x: t
+
+    @dr.freeze
+    def func(p: Point):
+        p.x = p.x + 1
+
+    p = Point(x=t(0, 1, 2))
+
+    func(p)
+    assert dr.all(t(1, 2, 3) == p.x)
+
+    p = Point(x=t(1, 2, 3))
+
+    func(p)
+    assert dr.all(t(2, 3, 4) == p.x)
