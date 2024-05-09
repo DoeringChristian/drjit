@@ -49,6 +49,14 @@ struct FlatVariables {
     std::vector<Layout> layout;
     JitBackend backend = JitBackend::None;
 
+    // Wether variables should be copied when their reference count is > 1
+    bool copy_on_write = true;
+
+    FlatVariables() {
+    }
+    FlatVariables(bool copy_on_write) : copy_on_write(copy_on_write) {
+    }
+
     void clear() {
         this->variable_index = 0;
         this->layout_index = 0;
@@ -78,7 +86,7 @@ struct FlatVariables {
                                          "frozen function is not supported!");
 
         uint32_t rc = jit_var_ref(index);
-        if (rc > 1) {
+        if (copy_on_write && rc > 1) {
             index = jit_var_copy(index);
             s.reset_index(index, inst_ptr(h));
             jit_var_dec_ref(index);
@@ -188,6 +196,10 @@ struct FlatVariables {
                 } else if (nb::object cb = get_traverse_cb_ro(tp);
                            cb.is_valid()) {
                     // TODO: traverse callback
+                } else {
+                    Layout layout;
+                    layout.type = nb::borrow<nb::type_object>(tp);
+                    this->layout.push_back(layout);
                 }
             }
         } catch (nb::python_error &e) {
@@ -207,10 +219,14 @@ struct FlatVariables {
     }
 
     nb::object construct() {
-        if (this->variables.size() == 0){
+        if (this->variables.size() == 0) {
             return nb::none();
         }
+
         Layout &layout = this->layout[layout_index++];
+        if (layout.type.is(nb::none().type())) {
+            return nb::none();
+        }
         if (is_drjit_type(layout.type)) {
             const ArraySupplement &s = supp(layout.type);
 
@@ -270,17 +286,73 @@ struct FlatVariables {
     }
 };
 
+void assign(nb::handle dst, nb::handle src) {
+    nb::handle src_tp = src.type();
+    nb::handle dtp = dst.type();
+    raise_if(!src_tp.equal(dtp), "");
+
+    if (is_drjit_type(src_tp)) {
+        const ArraySupplement &s = supp(src_tp);
+        if (s.is_tensor) {
+            s.reset_index(s.index(inst_ptr(src)), inst_ptr(dst));
+        } else if (s.ndim > 1) {
+            Py_ssize_t len = s.shape[0];
+            if (len == DRJIT_DYNAMIC)
+                len = s.len(inst_ptr(src));
+
+            for (Py_ssize_t i = 0; i < len; ++i) {
+                assign(dst[i], src[i]);
+            }
+        } else {
+        }
+    } else if (src_tp.is(&PyTuple_Type)) {
+        nb::tuple src_tuple = nb::borrow<nb::tuple>(src);
+        nb::tuple dst_tuple = nb::borrow<nb::tuple>(dst);
+        for (uint32_t i = 0; i < src_tuple.size(); ++i) {
+            assign(dst_tuple[i], src_tuple[i]);
+        }
+    } else if (src_tp.is(&PyList_Type)) {
+        nb::list src_list = nb::borrow<nb::list>(src);
+        nb::list dst_list = nb::borrow<nb::list>(dst);
+        for (uint32_t i = 0; i < src_list.size(); ++i) {
+            assign(dst_list[i], src_list[i]);
+        }
+    } else if (src_tp.is(&PyDict_Type)) {
+        nb::dict src_dict = nb::borrow<nb::dict>(src);
+        nb::dict dst_dict = nb::borrow<nb::dict>(dst);
+        for (auto k : src_dict.keys()) {
+            if (dst_dict.contains(k)) {
+                assign(dst_dict[k], src_dict[k]);
+            } else {
+                dst_dict[k] = src_dict[k];
+            }
+        }
+    } else {
+        if (nb::dict ds = get_drjit_struct(src_tp); ds.is_valid()) {
+            for (auto [k, v] : ds) {
+                assign(nb::getattr(dst, k), nb::getattr(src, k));
+            }
+        } else if (nb::object df = get_dataclass_fields(src_tp)) {
+            for (nb::handle field : df) {
+                nb::object k = field.attr(DR_STR(name));
+                assign(nb::getattr(dst, k), nb::getattr(src, k));
+            }
+        } else {
+        }
+    }
+}
+
 struct FrozenFunction {
     Recording *recording = nullptr;
     FlatVariables out_variables;
     nb::callable func;
 
-    FrozenFunction(nb::callable func) : func(func) {
+    FrozenFunction(nb::callable func) : out_variables(false), func(func) {
     }
 
     nb::object operator()(nb::args args) {
 
-        FlatVariables in_variables;
+        FlatVariables in_variables(true);
         in_variables.traverse(args);
 
         for (uint32_t index : in_variables.variables) {
@@ -300,8 +372,13 @@ struct FrozenFunction {
                              in_variables.variables.size());
 
             auto result = func(*args);
-            out_variables.traverse(result);
-            
+
+            nb::list output;
+            output.append(result);
+            output.append(args);
+
+            out_variables.traverse(output);
+
             raise_if((out_variables.variables.size() > 0 &&
                       in_variables.variables.size() > 0) &&
                          out_variables.backend != backend,
@@ -330,8 +407,12 @@ struct FrozenFunction {
 
             out_variables.layout_index = 0;
             out_variables.variable_index = 0;
-            auto result = out_variables.construct();
-            return result;
+            auto output = nb::borrow<nb::list>(out_variables.construct());
+            auto result = output[0];
+            auto new_args = output[1];
+            assign(args, new_args);
+
+            return output[0];
         }
     }
 };

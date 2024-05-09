@@ -2,11 +2,11 @@ import drjit as dr
 import pytest
 from dataclasses import dataclass
 
+dr.set_log_level(dr.LogLevel.Info)
+
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test01_basic(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dr.freeze
     def func(x, y):
         return x + y
@@ -26,8 +26,6 @@ def test01_basic(t):
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test02_output_tuple(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dr.freeze
     def func(x, y):
         return (x + y, x * y)
@@ -49,8 +47,6 @@ def test02_output_tuple(t):
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test03_output_list(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dr.freeze
     def func(x, y):
         return [x + y, x * y]
@@ -72,8 +68,6 @@ def test03_output_list(t):
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test04_output_dict(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dr.freeze
     def func(x, y):
         return {"add": x + y, "mul": x * y}
@@ -99,8 +93,6 @@ def test04_output_dict(t):
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test05_nested_tuple(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dr.freeze
     def func(x):
         return (x + 1, x + 2, (x + 3, x + 4))
@@ -118,8 +110,6 @@ def test05_nested_tuple(t):
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test06_drjit_struct(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     class Point:
         x: t
         y: t
@@ -151,8 +141,6 @@ def test06_drjit_struct(t):
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test06_dataclass(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dataclass
     class Point:
         x: t
@@ -182,8 +170,6 @@ def test06_dataclass(t):
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test07_scatter(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dr.freeze
     def func(x):
         dr.scatter(x, 0, dr.arange(t, 3))
@@ -206,8 +192,6 @@ def test07_scatter(t):
 
 @pytest.test_arrays("float32, is_diff, shape=(*)")
 def test08_optimization(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dr.freeze
     def func(x, ref):
         dr.enable_grad(x)
@@ -216,6 +200,8 @@ def test08_optimization(t):
         dr.backward(loss)
 
         dr.scatter(x, x - dr.grad(x), dr.arange(t, 4))
+
+        dr.disable_grad(x)
 
     x = t(0, 0, 0, 0)
     ref = t(1, 1, 1, 1)
@@ -226,8 +212,6 @@ def test08_optimization(t):
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test09_resized(t):
-    dr.set_log_level(dr.LogLevel.Info)
-
     @dr.freeze
     def func(x, y):
         return x + y
@@ -245,3 +229,22 @@ def test09_resized(t):
 
     o0 = func(i0, i1)
     assert dr.all(r0 == o0)
+
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test10_changed_input(t):
+    @dr.freeze
+    def func(d: dict):
+        d["y"] = d["x"] + 1
+
+    x = t(0, 1, 2)
+    d = {"x": x}
+
+    func(d)
+    assert dr.all(t(1, 2, 3) == d["y"])
+
+    x = t(1, 2, 3)
+    d = {"x": x}
+
+    func(d)
+    assert dr.all(t(2, 3, 4) == d["y"])
