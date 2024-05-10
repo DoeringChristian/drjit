@@ -276,3 +276,16 @@ def test11_changed_input_dataclass(t):
 
     func(p)
     assert dr.all(t(2, 3, 4) == p.x)
+
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test12_kwargs(t):
+    @dr.freeze
+    def func(x=t(0, 1, 2)):
+        return x + 1
+
+    y = func(x=t(0, 1, 2))
+    assert dr.all(t(1, 2, 3) == y)
+
+    y = func(x=t(1, 2, 3))
+    assert dr.all(t(2, 3, 4) == y)
