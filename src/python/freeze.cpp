@@ -350,6 +350,11 @@ struct FrozenFunction {
 
     FrozenFunction(nb::callable func) : out_variables(false), func(func) {
     }
+    ~FrozenFunction() {
+        if (this->recording) {
+            jit_record_destroy(this->recording);
+        }
+    }
 
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
 
