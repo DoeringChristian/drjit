@@ -351,10 +351,15 @@ struct FrozenFunction {
     FrozenFunction(nb::callable func) : out_variables(false), func(func) {
     }
 
-    nb::object operator()(nb::args args) {
+    nb::object operator()(nb::args args, nb::kwargs kwargs) {
 
+        nb::list input;
+        input.append(args);
+        input.append(kwargs);
+
+        // Collect input variables and evaluate them
         FlatVariables in_variables(true);
-        in_variables.traverse(args);
+        in_variables.traverse(input);
 
         for (uint32_t index : in_variables.variables) {
             jit_var_schedule(index);
@@ -372,7 +377,8 @@ struct FrozenFunction {
             jit_record_start(backend, in_variables.variables.data(),
                              in_variables.variables.size());
 
-            auto result = func(*args);
+            // Record the function
+            auto result = func(*args, **kwargs);
 
             nb::list output;
             output.append(result);
