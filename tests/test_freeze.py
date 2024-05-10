@@ -2,9 +2,6 @@ import drjit as dr
 import pytest
 from dataclasses import dataclass
 
-dr.set_log_level(dr.LogLevel.Info)
-
-
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test01_basic(t):
     @dr.freeze
@@ -289,3 +286,57 @@ def test12_kwargs(t):
 
     y = func(x=t(1, 2, 3))
     assert dr.all(t(2, 3, 4) == y)
+
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test13_opaque(t):
+    @dr.freeze
+    def func(x, y):
+        return x + y
+
+    x = t(0, 1, 2)
+    dr.set_label(x, "x")
+    y = dr.opaque(t, 1)
+    dr.set_label(y, "y")
+    z = func(x, y)
+    assert dr.all(t(1, 2, 3) == z)
+
+    with pytest.raises(RuntimeError):
+        x = t(1, 2, 3)
+        y = t(1, 2, 3)
+        z = func(x, y)
+        assert dr.all(t(2, 3, 4) == z)
+
+
+@pytest.test_arrays("float32, jit, -is_diff, shape=(*)")
+def test14_performance(t):
+    import time
+
+    n = 1024
+    n_iter = 1_000
+    n_iter_warmeup = 10
+
+    def func(x, y):
+        z = 0.5
+        result = dr.fma(dr.square(x), y, z)
+        result = dr.sqrt(dr.abs(result) + dr.power(result, 10))
+        result = dr.log(1 + result)
+        return result
+
+    frozen = dr.freeze(func)
+
+    for name, fn in [("normal", func), ("frozen", frozen)]:
+        x = dr.arange(t, n)  # + dr.opaque(t, i)
+        y = dr.arange(t, n)  # + dr.opaque(t, i)
+        dr.eval(x, y)
+        for i in range(n_iter + n_iter_warmeup):
+            if i == n_iter_warmeup:
+                t0 = time.time()
+
+            result = fn(x, y)
+
+            dr.eval(result)
+
+        dr.sync_thread()
+        elapsed = time.time() - t0
+        print(f"{name}: average {1000 * elapsed / n_iter:.3f} ms / iteration")
