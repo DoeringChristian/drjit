@@ -1,7 +1,5 @@
 
 #include "freeze.h"
-#include "apply.h"
-#include "autodiff.h"
 #include "base.h"
 #include "common.h"
 #include "drjit-core/jit.h"
@@ -23,6 +21,29 @@ struct Layout {
     // TODO: unionize
     size_t num = 0;
     std::vector<nb::object> fields;
+    VarType vt = VarType::Void;
+    VarState vs = VarState::Undefined;
+    bool singleton_array = false;
+
+    bool operator==(const Layout &rhs) const {
+        if (!(this->type.equal(rhs.type)))
+            return false;
+        if (this->num != rhs.num)
+            return false;
+        if (this->fields.size() != rhs.fields.size())
+            return false;
+        for (uint32_t i = 0; i < this->fields.size(); ++i) {
+            if (!(this->fields[i].equal(rhs.fields[i])))
+                return false;
+        }
+        if (this->vt != rhs.vt)
+            return false;
+        if (this->vs != rhs.vs)
+            return false;
+        if (this->singleton_array != rhs.singleton_array)
+            return false;
+        return true;
+    }
 };
 
 nb::object init_from_index(nb::type_object type, uint32_t variable_index) {
@@ -91,6 +112,15 @@ struct FlatVariables {
             s.reset_index(index, inst_ptr(h));
             jit_var_dec_ref(index);
         }
+
+        Layout layout;
+        layout.type = nb::borrow<nb::type_object>(h.type());
+        layout.vt = jit_var_type(index);
+        layout.vs = jit_var_state(index);
+        layout.singleton_array = jit_var_size(index) == 1;
+        this->layout.push_back(layout);
+        jit_log(LogLevel::Info, "Flattening variable (type=%u state=%u)",
+                (uint32_t)layout.vt, (uint32_t)layout.vs);
         variables.push_back(index);
     }
 
@@ -101,10 +131,6 @@ struct FlatVariables {
             if (is_drjit_type(tp)) {
                 const ArraySupplement &s = supp(tp);
                 if (s.is_tensor) {
-                    Layout layout;
-                    layout.type = nb::borrow<nb::type_object>(tp);
-                    this->layout.push_back(layout);
-
                     collect(h);
                 } else if (s.ndim > 1) {
                     Py_ssize_t len = s.shape[0];
@@ -119,10 +145,6 @@ struct FlatVariables {
                     for (Py_ssize_t i = 0; i < len; ++i)
                         traverse(nb::steal(s.item(h.ptr(), i)));
                 } else {
-                    Layout layout;
-                    layout.type = nb::borrow<nb::type_object>(tp);
-                    this->layout.push_back(layout);
-
                     collect(h);
                 }
             } else if (tp.is(&PyTuple_Type)) {
@@ -346,6 +368,7 @@ void assign(nb::handle dst, nb::handle src) {
 struct FrozenFunction {
     Recording *recording = nullptr;
     FlatVariables out_variables;
+    std::vector<Layout> in_layout;
     nb::callable func;
 
     FrozenFunction(nb::callable func) : out_variables(false), func(func) {
@@ -410,8 +433,12 @@ struct FrozenFunction {
                                         out_variables.variables.size());
             jit_log(LogLevel::Info, "Recording done");
 
+            this->in_layout = std::move(in_variables.layout);
             return result;
         } else {
+            // TODO: report missmatch
+            raise_if(this->in_layout != in_variables.layout,
+                     "freeze(): Layout mismatch!");
             jit_log(LogLevel::Info, "Replaying:");
             jit_record_replay(recording, in_variables.variables.data(),
                               out_variables.variables.data());
