@@ -7,6 +7,7 @@
 #include "listobject.h"
 #include "pyerrors.h"
 #include "tupleobject.h"
+#include <tsl/robin_map.h>
 #include <vector>
 
 static const char *doc_freeze = R"(
@@ -17,13 +18,23 @@ static const char *doc_freeze = R"(
 /// sub-elements or their field keys. This can be used to reconstruct a pytree
 /// from a flattened variable array.
 struct Layout {
+    /// Nanobind type of the container/variable
     nb::type_object type;
-    // TODO: unionize
+    /// Number of members in this container
     size_t num = 0;
+    /// Optional field identifiers of the container
+    /// for example: keys in dictionary
     std::vector<nb::object> fields;
+    /// Optional drjit type of the variable
     VarType vt = VarType::Void;
+    /// Optional evaluation state of the variable
     VarState vs = VarState::Undefined;
+    /// Weather the variable is an array with a single entry.
+    /// Such arrays are handled differently by the compiler.
     bool singleton_array = false;
+    /// The index in the flat_variables array of this variable.
+    /// This can be used to determine aliasing.
+    uint32_t index = 0;
 
     bool operator==(const Layout &rhs) const {
         if (!(this->type.equal(rhs.type)))
@@ -42,6 +53,8 @@ struct Layout {
             return false;
         if (this->singleton_array != rhs.singleton_array)
             return false;
+        if (this->index != rhs.index)
+            return false;
         return true;
     }
 };
@@ -50,9 +63,6 @@ nb::object init_from_index(nb::type_object type, uint32_t variable_index) {
     auto result = nb::inst_alloc_zero(type);
     const ArraySupplement &s = supp(result.type());
     s.init_index(variable_index, inst_ptr(result));
-
-    // Decrement index as `init_index` is borrowing
-    jit_var_dec_ref(variable_index);
     return result;
 }
 
@@ -60,11 +70,12 @@ struct FlatVariables {
 
     // Variables, used to iterate over the variables/layouts when constructing
     // python objects
-    uint32_t variable_index = 0;
     uint32_t layout_index = 0;
 
     /// The flattened variable indices of the input/output to a frozen function
     std::vector<uint32_t> variables;
+    /// Mapping from drjit variable index to index in flat variables
+    tsl::robin_map<uint32_t, uint32_t> index_to_flat;
     /// This saves information about the type, size and fields of pytree
     /// objects. The information is stored in DFS order.
     std::vector<Layout> layout;
@@ -79,11 +90,44 @@ struct FlatVariables {
     }
 
     void clear() {
-        this->variable_index = 0;
         this->layout_index = 0;
         this->variables.clear();
+        this->index_to_flat.clear();
         this->layout.clear();
         this->backend = JitBackend::None;
+    }
+    void drop_variables(){
+        for (uint32_t &index : this->variables){
+            jit_var_dec_ref(index);
+        }
+    }
+
+    /**
+     * Adds a variable to the flattened array, deduplicating it.
+     * This allows for checking for aliasing conditions, as aliasing inputs map
+     * to the same flat variable index.
+     */
+    uint32_t add_variable(uint32_t variable_index) {
+        auto it = this->index_to_flat.find(variable_index);
+
+        if (it == this->index_to_flat.end()) {
+            uint32_t flat_index = this->variables.size();
+            jit_log(LogLevel::Info,
+                    "collect(): Adding new variable var(%u) -> flat_var(%u)",
+                    variable_index, flat_index);
+
+            this->variables.push_back(variable_index);
+
+            this->index_to_flat.insert({variable_index, flat_index});
+            return flat_index;
+        } else {
+            uint32_t flat_index = it.value();
+            jit_log(
+                LogLevel::Info,
+                "collect(): Found aliasing condition var(%u) -> flat_var(%u)",
+                variable_index, flat_index);
+            return flat_index;
+        }
     }
 
     void collect(nb::handle h) {
@@ -106,7 +150,9 @@ struct FlatVariables {
         raise_if(ad_grad_enabled(index), "Passing gradients into/out of a "
                                          "frozen function is not supported!");
 
+        jit_log(LogLevel::Info, "collect(): collecting var(%u)", index);
         uint32_t rc = jit_var_ref(index);
+        jit_log(LogLevel::Info, "\trc=%u", rc);
         if (copy_on_write && rc > 1) {
             index = jit_var_copy(index);
             s.reset_index(index, inst_ptr(h));
@@ -118,10 +164,8 @@ struct FlatVariables {
         layout.vt = jit_var_type(index);
         layout.vs = jit_var_state(index);
         layout.singleton_array = jit_var_size(index) == 1;
+        layout.index = this->add_variable(index);
         this->layout.push_back(layout);
-        jit_log(LogLevel::Info, "Flattening variable (type=%u state=%u)",
-                (uint32_t)layout.vt, (uint32_t)layout.vs);
-        variables.push_back(index);
     }
 
     void traverse(nb::handle h) {
@@ -241,7 +285,7 @@ struct FlatVariables {
     }
 
     nb::object construct() {
-        if (this->variables.size() == 0) {
+        if (this->layout.size() == 0) {
             return nb::none();
         }
 
@@ -253,18 +297,16 @@ struct FlatVariables {
             const ArraySupplement &s = supp(layout.type);
 
             if (s.is_tensor) {
-                auto result = init_from_index(layout.type,
-                                              this->variables[variable_index]);
-                variable_index++;
+                auto result =
+                    init_from_index(layout.type, this->variables[layout.index]);
                 return result;
             } else if (s.ndim > 1) {
                 nb::raise("FlatVariables::construct(): dynamic sized Dr.Jit "
                           "variables are not yet supported.");
 
             } else {
-                uint32_t index = this->variables[variable_index];
+                uint32_t index = this->variables[layout.index];
                 auto result = init_from_index(layout.type, index);
-                variable_index++;
                 return result;
             }
         } else if (layout.type.is(&PyTuple_Type)) {
@@ -445,11 +487,14 @@ struct FrozenFunction {
             jit_log(LogLevel::Info, "Replaying done:");
 
             out_variables.layout_index = 0;
-            out_variables.variable_index = 0;
             auto output = nb::borrow<nb::list>(out_variables.construct());
             auto result = output[0];
             auto new_args = output[1];
             assign(args, new_args);
+            
+            // out_variables is assigned by jit_record_replay, which transfers ownership to this array.
+            // Therefore, we have to dop the variables afterwards.
+            out_variables.drop_variables();
 
             return output[0];
         }
