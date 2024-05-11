@@ -1,6 +1,7 @@
 import drjit as dr
 import pytest
 from dataclasses import dataclass
+dr.set_log_level(dr.LogLevel.Info)
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test01_basic(t):
@@ -340,3 +341,27 @@ def test14_performance(t):
         dr.sync_thread()
         elapsed = time.time() - t0
         print(f"{name}: average {1000 * elapsed / n_iter:.3f} ms / iteration")
+        
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test15_aliasing(t):
+    @dr.freeze
+    def func(x, y):
+        return x+y
+
+    print("aliased:")
+    x = t(0, 1, 2)
+    y = x
+    z = func(x, y)
+    assert dr.all(t(0, 2, 4) == z)
+    
+    print("aliased:")
+    x = t(1, 2, 3)
+    y = x
+    z = func(x, y)
+    assert dr.all(t(2, 4, 6) == z)
+    
+    with pytest.raises(RuntimeError):
+        print("non-aliased:")
+        x = t(1, 2, 3)
+        y = t(2, 3, 4)
+        z = func(x, y)
