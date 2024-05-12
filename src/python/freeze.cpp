@@ -96,8 +96,8 @@ struct FlatVariables {
         this->layout.clear();
         this->backend = JitBackend::None;
     }
-    void drop_variables(){
-        for (uint32_t &index : this->variables){
+    void drop_variables() {
+        for (uint32_t &index : this->variables) {
             jit_var_dec_ref(index);
         }
     }
@@ -491,9 +491,10 @@ struct FrozenFunction {
             auto result = output[0];
             auto new_args = output[1];
             assign(args, new_args);
-            
-            // out_variables is assigned by jit_record_replay, which transfers ownership to this array.
-            // Therefore, we have to dop the variables afterwards.
+
+            // out_variables is assigned by jit_record_replay, which transfers
+            // ownership to this array. Therefore, we have to dop the variables
+            // afterwards.
             out_variables.drop_variables();
 
             return output[0];
