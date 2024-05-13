@@ -33,6 +33,8 @@ struct Layout {
     /// Weather the variable is an array with a single entry.
     /// Such arrays are handled differently by the compiler.
     bool singleton_array = false;
+    /// The literal data
+    void *literal = nullptr;
     /// The index in the flat_variables array of this variable.
     /// This can be used to determine aliasing.
     uint32_t index = 0;
@@ -55,6 +57,8 @@ struct Layout {
         if (this->singleton_array != rhs.singleton_array)
             return false;
         if (this->index != rhs.index)
+            return false;
+        if (this->literal != rhs.literal)
             return false;
         return true;
     }
@@ -161,11 +165,22 @@ struct FlatVariables {
         }
 
         Layout layout;
+        VarState vs = jit_var_state(index);
         layout.type = nb::borrow<nb::type_object>(h.type());
+        layout.vs = vs;
         layout.vt = jit_var_type(index);
-        layout.vs = jit_var_state(index);
-        layout.singleton_array = jit_var_size(index) == 1;
-        layout.index = this->add_variable(index);
+
+        // NOTE: it might be a good idea to do this after evaluation
+        if (vs == VarState::Literal) {
+            jit_log(LogLevel::Info, "    vs=Literal");
+            layout.singleton_array = jit_var_size(index) == 1;
+            layout.literal = nullptr;
+            jit_var_read(index, 0, &layout.literal);
+        } else {
+            jit_log(LogLevel::Info, "    vs=%u", (uint32_t)vs);
+            layout.index = this->add_variable(index);
+            layout.singleton_array = jit_var_size(index) == 1;
+        }
         this->layout.push_back(layout);
     }
 
@@ -286,6 +301,29 @@ struct FlatVariables {
         }
     }
 
+    nb::object construct_dr_var(Layout &layout) {
+        if (layout.vs == VarState::Literal) {
+            uint32_t index =
+                jit_var_literal(this->backend, layout.vt, &layout.literal);
+
+            auto result = nb::inst_alloc_zero(layout.type);
+            const ArraySupplement &s = supp(result.type());
+            s.init_index(index, inst_ptr(result));
+
+            // Have to decrement reference, as it is not part of `variables` and
+            // will not be freed
+            jit_var_dec_ref(index);
+            return result;
+        } else {
+            uint32_t index = this->variables[layout.index];
+
+            auto result = nb::inst_alloc_zero(layout.type);
+            const ArraySupplement &s = supp(result.type());
+            s.init_index(index, inst_ptr(result));
+            return result;
+        }
+    }
+
     nb::object construct() {
         if (this->layout.size() == 0) {
             return nb::none();
@@ -299,17 +337,13 @@ struct FlatVariables {
             const ArraySupplement &s = supp(layout.type);
 
             if (s.is_tensor) {
-                auto result =
-                    init_from_index(layout.type, this->variables[layout.index]);
-                return result;
+                return construct_dr_var(layout);
             } else if (s.ndim > 1) {
                 nb::raise("FlatVariables::construct(): dynamic sized Dr.Jit "
                           "variables are not yet supported.");
 
             } else {
-                uint32_t index = this->variables[layout.index];
-                auto result = init_from_index(layout.type, index);
-                return result;
+                return construct_dr_var(layout);
             }
         } else if (layout.type.is(&PyTuple_Type)) {
             nb::list list;
@@ -445,7 +479,8 @@ struct FrozenFunction {
         JitBackend backend = in_variables.backend;
 
         if (recording == nullptr) {
-            jit_log(LogLevel::Info, "Recording:");
+            jit_log(LogLevel::Info,
+                    "Recording (n_inputs=%u):", in_variables.variables.size());
             jit_record_start(backend, in_variables.variables.data(),
                              in_variables.variables.size());
 
@@ -475,7 +510,8 @@ struct FrozenFunction {
 
             recording = jit_record_stop(backend, out_variables.variables.data(),
                                         out_variables.variables.size());
-            jit_log(LogLevel::Info, "Recording done");
+            jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
+                    out_variables.variables.size());
 
             this->in_layout = std::move(in_variables.layout);
             return result;
