@@ -369,14 +369,46 @@ def test15_aliasing(t):
         y = t(2, 3, 4)
         z = func(x, y)
 
+
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test16_non_jit_types(t):
     @dr.freeze
     def func(x, y):
         return x + y
-    
+
     x = t(1, 2, 3)
     y = 1
 
     with pytest.raises(RuntimeError):
-        y = func(x, y)
+        z = func(x, y)
+
+
+@pytest.test_arrays("uint32, jit, cuda, -is_diff, shape=(*)")
+def test17_literal(t):
+    dr.set_log_level(dr.LogLevel.Trace)
+
+    @dr.freeze
+    def func(x, y):
+        z = x + y
+        w = t(1)
+        return z, w
+
+    # Literals
+    x = t(0, 1, 2)
+    dr.set_label(x, "x")
+    y = t(1)
+    dr.set_label(y, "y")
+    z, w = func(x, y)
+    assert dr.all(z == t(1, 2, 3))
+    assert dr.all(w == t(1))
+
+    x = t(0, 1, 2)
+    y = t(1)
+    z, w = func(x, y)
+    assert dr.all(z == t(1, 2, 3))
+    assert dr.all(w == t(1))
+
+    with pytest.raises(RuntimeError):
+        x = t(0, 1, 2)
+        y = t(2)
+        z = func(x, y)
