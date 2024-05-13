@@ -4,6 +4,7 @@
 #include "common.h"
 #include "drjit-core/jit.h"
 #include "drjit/extra.h"
+#include "eval.h"
 #include "listobject.h"
 #include "object.h"
 #include "pyerrors.h"
@@ -173,13 +174,19 @@ struct FlatVariables {
         // NOTE: it might be a good idea to do this after evaluation
         if (vs == VarState::Literal) {
             jit_log(LogLevel::Info, "    vs=Literal");
-            layout.singleton_array = jit_var_size(index) == 1;
+
+            raise_if(jit_var_size(index) > 1,
+                     "collect(): Size larger than 1 not supported yet!");
+
             layout.literal = nullptr;
             jit_var_read(index, 0, &layout.literal);
-        } else {
+        } else if (vs == VarState::Evaluated) {
             jit_log(LogLevel::Info, "    vs=%u", (uint32_t)vs);
             layout.index = this->add_variable(index);
             layout.singleton_array = jit_var_size(index) == 1;
+        } else {
+            nb::raise("collect(): found variable %zu in unsupported state %u!",
+                      index, (uint32_t)vs);
         }
         this->layout.push_back(layout);
     }
@@ -491,6 +498,8 @@ struct FrozenFunction {
             output.append(result);
             output.append(args);
 
+            eval(output);
+
             out_variables.traverse(output);
 
             raise_if((out_variables.variables.size() > 0 &&
@@ -502,14 +511,9 @@ struct FrozenFunction {
                      "variables)",
                      (uint32_t)out_variables.backend, (uint32_t)backend);
 
-            // Eval output variables
-            for (uint32_t index : out_variables.variables) {
-                jit_var_schedule(index);
-            }
-            jit_eval();
-
             recording = jit_record_stop(backend, out_variables.variables.data(),
                                         out_variables.variables.size());
+
             jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
                     out_variables.variables.size());
 
