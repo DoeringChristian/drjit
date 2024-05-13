@@ -386,6 +386,7 @@ def test16_non_jit_types(t):
 @pytest.test_arrays("uint32, jit, cuda, -is_diff, shape=(*)")
 def test17_literal(t):
     dr.set_log_level(dr.LogLevel.Trace)
+    dr.set_flag(dr.JitFlag.KernelHistory, True)
 
     @dr.freeze
     def func(x, y):
