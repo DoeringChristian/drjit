@@ -404,8 +404,8 @@ struct FlatVariables {
             }
         }
         nb::raise("FlatVariables::construct(): could not reconstruct "
-                  "output variable of type %U",
-                  nb::type_name(layout.type).ptr());
+                  "output variable of type %s",
+                  nb::type_name(layout.type).c_str());
     }
 };
 
@@ -522,6 +522,10 @@ struct FrozenFunction {
             output.append(args);
 
             eval(output);
+
+            // Pause recording before traversal as to not accedentally record
+            // unwanted operations.
+            jit_record_pause(backend);
 
             out_variables.traverse(output);
 
