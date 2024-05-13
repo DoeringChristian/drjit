@@ -5,6 +5,7 @@
 #include "drjit-core/jit.h"
 #include "drjit/extra.h"
 #include "listobject.h"
+#include "object.h"
 #include "pyerrors.h"
 #include "tupleobject.h"
 #include <tsl/robin_map.h>
@@ -228,45 +229,46 @@ struct FlatVariables {
                 for (auto [k, v] : dict) {
                     traverse(v);
                 }
-            } else {
-                if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()) {
+            } else if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()) {
 
-                    Layout layout;
-                    layout.type = nb::borrow<nb::type_object>(tp);
-                    layout.num = ds.size();
-                    layout.fields.reserve(layout.num);
-                    for (auto k : ds.keys()) {
-                        layout.fields.push_back(nb::borrow(k));
-                    }
-                    this->layout.push_back(layout);
-
-                    for (auto [k, v] : ds) {
-                        traverse(nb::getattr(h, k));
-                    }
-                } else if (nb::object df = get_dataclass_fields(tp);
-                           df.is_valid()) {
-
-                    Layout layout;
-                    layout.type = nb::borrow<nb::type_object>(tp);
-                    for (auto field : df) {
-                        nb::object k = field.attr(DR_STR(name));
-                        layout.fields.push_back(nb::borrow(k));
-                    }
-                    layout.num = layout.fields.size();
-                    this->layout.push_back(layout);
-
-                    for (nb::handle field : df) {
-                        nb::object k = field.attr(DR_STR(name));
-                        traverse(nb::getattr(h, k));
-                    }
-                } else if (nb::object cb = get_traverse_cb_ro(tp);
-                           cb.is_valid()) {
-                    // TODO: traverse callback
-                } else {
-                    Layout layout;
-                    layout.type = nb::borrow<nb::type_object>(tp);
-                    this->layout.push_back(layout);
+                Layout layout;
+                layout.type = nb::borrow<nb::type_object>(tp);
+                layout.num = ds.size();
+                layout.fields.reserve(layout.num);
+                for (auto k : ds.keys()) {
+                    layout.fields.push_back(nb::borrow(k));
                 }
+                this->layout.push_back(layout);
+
+                for (auto [k, v] : ds) {
+                    traverse(nb::getattr(h, k));
+                }
+            } else if (nb::object df = get_dataclass_fields(tp);
+                       df.is_valid()) {
+
+                Layout layout;
+                layout.type = nb::borrow<nb::type_object>(tp);
+                for (auto field : df) {
+                    nb::object k = field.attr(DR_STR(name));
+                    layout.fields.push_back(nb::borrow(k));
+                }
+                layout.num = layout.fields.size();
+                this->layout.push_back(layout);
+
+                for (nb::handle field : df) {
+                    nb::object k = field.attr(DR_STR(name));
+                    traverse(nb::getattr(h, k));
+                }
+            } else if (nb::object cb = get_traverse_cb_ro(tp); cb.is_valid()) {
+                // TODO: traverse callback
+            } else if (tp.is(&_PyNone_Type)) {
+                Layout layout;
+                layout.type = nb::borrow<nb::type_object>(tp);
+                this->layout.push_back(layout);
+            } else {
+                nb::raise("Encountered unsupported type! Only drjit types or "
+                          "composite types containing drjit variables are "
+                          "supported.");
             }
         } catch (nb::python_error &e) {
             nb::raise_from(e, PyExc_RuntimeError,
