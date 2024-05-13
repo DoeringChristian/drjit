@@ -171,14 +171,14 @@ struct FlatVariables {
         layout.vs = vs;
         layout.vt = jit_var_type(index);
 
-        // NOTE: it might be a good idea to do this after evaluation
         if (vs == VarState::Literal) {
             jit_log(LogLevel::Info, "    vs=Literal");
 
             raise_if(jit_var_size(index) > 1,
                      "collect(): Size larger than 1 not supported yet!");
 
-            layout.literal = nullptr;
+            // NOTE: This should not cause any new operations to be recorded, as
+            // we have stablished that the variable is a literal.
             jit_var_read(index, 0, &layout.literal);
         } else if (vs == VarState::Evaluated) {
             jit_log(LogLevel::Info, "    vs=%u", (uint32_t)vs);
@@ -191,6 +191,18 @@ struct FlatVariables {
         this->layout.push_back(layout);
     }
 
+    /**
+     * Traverses a PyTree in DFS order, and records it's layout in the
+     * `layout` vector.
+     *
+     * When hitting a drjit primitive type, it calls the
+     * `collect` method, which will add their indices to the `flat_variables`
+     * vector.
+     * The collect method will also record metadata about the drjit variable in
+     * the layout.
+     * Therefore, the layout can be used as an identifier to the recording of
+     * the frozen function.
+     */
     void traverse(nb::handle h) {
         nb::handle tp = h.type();
 
@@ -331,6 +343,10 @@ struct FlatVariables {
         }
     }
 
+    /**
+     * This is the counterpart to the traverse method.
+     * Given a layout vector and flat_variables, it re-constructs the PyTree.
+     */
     nb::object construct() {
         if (this->layout.size() == 0) {
             return nb::none();
@@ -393,6 +409,13 @@ struct FlatVariables {
     }
 };
 
+/**
+ * Recursively assigns the drjit variables in the PyTree `src` to the object
+ * `dst`. This is used to update the input of frozen functions, if their indices
+ * should have changed.
+ * It allso asigns new key-value pairs to dictionaries if these have been added
+ * during the recording of a frozen function.
+ */
 void assign(nb::handle dst, nb::handle src) {
     nb::handle src_tp = src.type();
     nb::handle dtp = dst.type();
