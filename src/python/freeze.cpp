@@ -153,6 +153,15 @@ struct FlatVariables {
 
         uint64_t index = s.index(inst_ptr(h));
 
+        if (jit_var_type(index) == VarType::Pointer) {
+            // In order to support pointer inputs,
+            // we would have to get the source variable, handle the case when
+            // it's rc > 1 and potentially create a new pointer pointing to the
+            // new source variable. Then we could add the new variable to the
+            // flat variables.
+            nb::raise("Pointer inputs not yet supported!");
+        }
+
         raise_if(ad_grad_enabled(index), "Passing gradients into/out of a "
                                          "frozen function is not supported!");
 

@@ -413,3 +413,18 @@ def test17_literal(t):
         x = t(0, 1, 2)
         y = t(2)
         z = func(x, y)
+
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test18_pointers(t):
+    UInt32 = dr.uint32_array_t(t)
+
+    @dr.freeze
+    def func(x):
+        idx = dr.arange(UInt32, 0, dr.width(x), 3)
+
+        return dr.gather(t, x, idx)
+
+    y = func(t(0, 1, 2, 3, 4, 5, 6))
+
+    print(y)
