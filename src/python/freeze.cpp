@@ -498,6 +498,10 @@ struct FrozenFunction {
 
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
 
+        if (!jit_flag(JitFlag::KernelFreezing)){
+            return func(*args, **kwargs);
+        }
+
         nb::list input;
         input.append(args);
         input.append(kwargs);
@@ -520,7 +524,10 @@ struct FrozenFunction {
                              in_variables.variables.size());
 
             // Record the function
+            bool tmp = jit_flag(JitFlag::KernelFreezing);
+            jit_set_flag(JitFlag::KernelFreezing, false);
             auto result = func(*args, **kwargs);
+            jit_set_flag(JitFlag::KernelFreezing, tmp);
 
             nb::list output;
             output.append(result);
