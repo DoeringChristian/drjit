@@ -5,6 +5,15 @@ import sys
 
 dr.set_log_level(dr.LogLevel.Info)
 
+def get_single_entry(x):
+    tp = type(x)
+    result = x
+    shape = dr.shape(x)
+    if len(shape) == 2:
+        result = result[shape[0]-1]
+    if len(shape) == 3:
+        result = result[shape[0]-1][shape[1]-1]
+    return result
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
 def test01_basic(t):
@@ -475,7 +484,7 @@ def test19_vcall(t, symbolic):
 
     
 @pytest.test_arrays("float32, jit, shape=(*)")
-def test21_freeze(t):
+def test01_freeze(t):
     UInt32 = dr.uint32_array_t(t)
     Float = dr.float32_array_t(t)
 
@@ -503,7 +512,7 @@ def test21_freeze(t):
         
 @pytest.mark.parametrize("freeze_first", (True, False))
 @pytest.test_arrays("float32, jit, shape=(*)")
-def test32_calling_frozen_from_frozen(t, freeze_first):
+def test12_calling_frozen_from_frozen(t, freeze_first):
     mod = sys.modules[t.__module__]
     Float = mod.Float32
     Array3f = mod.Array3f
@@ -542,3 +551,27 @@ def test32_calling_frozen_from_frozen(t, freeze_first):
 
         result3 = fun2(2 * x, 0.5 * y)
         assert dr.allclose(result3, dr.square(2 * x) + dr.square(0.5 * y))
+        
+        
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test17_no_inputs(t):
+    mod = sys.modules[t.__module__]
+    UInt32 = mod.UInt32
+    Float = mod.Float
+
+    @dr.freeze
+    def fun(a):
+        x = t(dr.linspace(Float, -1, 1, 10)) + a
+        source = get_single_entry(x + 2 * x)
+        index = dr.arange(UInt32, dr.width(source))
+        active = index % UInt32(2) != 0
+
+        return dr.gather(Float, source, index, active)
+
+    a = t(0.1)
+    res1 = fun(a)
+    res2 = fun(a)
+    res3 = fun(a)
+
+    assert dr.allclose(res1, res2)
+    assert dr.allclose(res1, res3)
