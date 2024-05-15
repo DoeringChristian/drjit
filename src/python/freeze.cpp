@@ -165,7 +165,7 @@ struct FlatVariables {
         raise_if(ad_grad_enabled(index), "Passing gradients into/out of a "
                                          "frozen function is not supported!");
 
-        jit_log(LogLevel::Info, "collect(): collecting var(%u)", index);
+        jit_log(LogLevel::Info, "collect(): collecting var(%u, backend=%u)", index, var_backend);
         uint32_t rc = jit_var_ref(index);
         jit_log(LogLevel::Info, "\trc=%u", rc);
         if (copy_on_write && rc > 1) {
@@ -511,7 +511,7 @@ struct FrozenFunction {
         FlatVariables in_variables(true);
         in_variables.traverse(input);
 
-        raise_if(in_variables.variables.size() == 0,
+        raise_if(in_variables.backend == JitBackend::None,
                  "freeze(): Cannot infer backend without providing input "
                  "variable to frozen functin!");
 
