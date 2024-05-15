@@ -499,3 +499,46 @@ def test21_freeze(t):
         assert dr.allclose(x_int, UInt32(x))
         assert dr.allclose(y_int, UInt32(y))
         print("------------------------------")
+        
+        
+@pytest.mark.parametrize("freeze_first", (True, False))
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test32_calling_frozen_from_frozen(t, freeze_first):
+    mod = sys.modules[t.__module__]
+    Float = mod.Float32
+    Array3f = mod.Array3f
+    n = 37
+    x = dr.full(Float, 1.5, n) + dr.opaque(Float, 2)
+    y = dr.full(Float, 0.5, n) + dr.opaque(Float, 10)
+    dr.eval(x, y)
+
+    @dr.freeze
+    def fun1(x):
+        return dr.square(x)
+
+    @dr.freeze
+    def fun2(x, y):
+        return fun1(x) + fun1(y)
+
+    # Calling a frozen function from a frozen function.
+    if freeze_first:
+        dr.eval(fun1(x))
+
+    result1 = fun2(x, y)
+    assert dr.allclose(result1, dr.square(x) + dr.square(y))
+
+    if not freeze_first:
+        # If the nested function hasn't been recorded yet, calling it
+        # while freezing the outer function shouldn't freeze it with
+        # those arguments.
+        # In other words, any freezing mechanism should be completely
+        # disabled while recording a frozen function.
+        # assert fun1.frozen.kernels is None
+
+        # We should therefore be able to freeze `fun1` with a different
+        # type of argument, and both `fun1` and `fun2` should work fine.
+        result2 = fun1(Array3f(0.5, x, y))
+        assert dr.allclose(result2, Array3f(0.5 * 0.5, dr.square(x), dr.square(y)))
+
+        result3 = fun2(2 * x, 0.5 * y)
+        assert dr.allclose(result3, dr.square(2 * x) + dr.square(0.5 * y))
