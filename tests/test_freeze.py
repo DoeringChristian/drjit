@@ -1,6 +1,7 @@
 import drjit as dr
 import pytest
 from dataclasses import dataclass
+import sys
 
 dr.set_log_level(dr.LogLevel.Info)
 
@@ -428,3 +429,73 @@ def test18_pointers(t):
     y = func(t(0, 1, 2, 3, 4, 5, 6))
 
     print(y)
+
+
+def get_pkg(t):
+    with dr.detail.scoped_rtld_deepbind():
+        m = pytest.importorskip("call_ext")
+    backend = dr.backend_v(t)
+    if backend == dr.JitBackend.LLVM:
+        return m.llvm
+    elif backend == dr.JitBackend.CUDA:
+        return m.cuda
+
+
+@pytest.mark.parametrize("symbolic", [True])
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test19_vcall(t, symbolic):
+    pkg = get_pkg(t)
+
+    A, B, Base, BasePtr = pkg.A, pkg.B, pkg.Base, pkg.BasePtr
+    Mask = dr.mask_t(t)
+    a, b = A(), B()
+
+    c = BasePtr(a, a, None, a, a)
+
+    xi = t(1, 2, 8, 3, 4)
+    yi = t(5, 6, 8, 7, 8)
+
+    @dr.freeze
+    def func(c, xi, yi):
+        return c.f(xi, yi)
+
+    with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
+        xo, yo = func(c, xi, yi)
+        
+    assert dr.all(xo == t(10, 12, 0, 14, 16))
+    assert dr.all(yo == t(-1, -2, 0, -3, -4))
+    
+    c = BasePtr(a, a, None, b, b)
+        
+    with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
+        xo, yo = func(c, xi, yi)
+        
+    assert dr.all(xo == t(10, 12, 0, 21, 24))
+    assert dr.all(yo == t(-1, -2, 0, 3, 4))
+
+    
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test21_freeze(t):
+    UInt32 = dr.uint32_array_t(t)
+    Float = dr.float32_array_t(t)
+
+    @dr.freeze
+    def my_kernel(x):
+        x_int = UInt32(x)
+        result = x * x
+        result_int = UInt32(result)
+
+        return result, x_int, result_int
+
+    for i in range(3):
+        print(f"------------------------------ {i}")
+        x = Float([1.0, 2.0, 3.0]) + dr.opaque(Float, i)
+
+        y, x_int, y_int = my_kernel(x)
+        dr.schedule(y, x_int, y_int)
+        print("Input was:", x)
+        print("Outputs were:", y, x_int, y_int)
+        assert dr.allclose(y, dr.square(x))
+        assert dr.allclose(x_int, UInt32(x))
+        assert dr.allclose(y_int, UInt32(y))
+        print("------------------------------")

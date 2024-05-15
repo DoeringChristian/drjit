@@ -503,13 +503,9 @@ struct FrozenFunction {
         input.append(kwargs);
 
         // Collect input variables and evaluate them
+        eval(input);
         FlatVariables in_variables(true);
         in_variables.traverse(input);
-
-        for (uint32_t index : in_variables.variables) {
-            jit_var_schedule(index);
-        }
-        jit_eval();
 
         raise_if(in_variables.variables.size() == 0,
                  "freeze(): Cannot infer backend without providing input "
