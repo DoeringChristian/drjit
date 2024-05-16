@@ -948,114 +948,114 @@ def test27_global_flag(t):
         assert dr.allclose(result3, 2.9)
 
 
-# @pytest.mark.parametrize("struct_style", ["drjit", "dataclass"])
-# @pytest.test_arrays("float32, jit, cuda, shape=(*)")
-# def test28_return_types(t, struct_style):
-#     mod = sys.modules[t.__module__]
-#     Float = t
-#     Array3f = mod.Array3f
-#     UInt32 = mod.UInt32
-#
-#     import numpy as np
-#
-#     if struct_style == "drjit":
-#
-#         class ToyDataclass:
-#             DRJIT_STRUCT: dict = {"a": Float, "b": Float}
-#             a: Float
-#             b: Float
-#
-#             def __init__(self, a=None, b=None):
-#                 self.a = a
-#                 self.b = b
-#
-#     else:
-#         assert struct_style == "dataclass"
-#
-#         @dataclass(kw_only=True, frozen=True)
-#         class ToyDataclass:
-#             a: Float
-#             b: Float
-#
-#     # 1. Many different types
-#     @dr.freeze
-#     def toy1(x: Float) -> Float:
-#         y = x**2 + dr.sin(x)
-#         z = x**2 + dr.cos(x)
-#         return (x, y, z, ToyDataclass(a=x, b=y), {"x": x, "yi": UInt32(y)}, [[[[x]]]])
-#
-#     for i in range(3):
-#         input = Float(np.full(17, i))
-#         result = toy1(input)
-#         assert isinstance(result[0], Float)
-#         assert isinstance(result[1], Float)
-#         assert isinstance(result[2], Float)
-#         assert isinstance(result[3], ToyDataclass)
-#         assert isinstance(result[4], dict)
-#         assert result[4].keys() == set(("x", "yi"))
-#         assert isinstance(result[4]["x"], Float)
-#         assert isinstance(result[4]["yi"], UInt32)
-#         assert isinstance(result[5], list)
-#         assert isinstance(result[5][0], list)
-#         assert isinstance(result[5][0][0], list)
-#         assert isinstance(result[5][0][0][0], list)
-#
-#     # 2. Many different types
-#     @dr.freeze
-#     def toy2(x: Float, target: Float) -> Float:
-#         dr.scatter(target, 0.5 + x, dr.arange(UInt32, dr.width(x)))
-#         return None
-#
-#     for i in range(3):
-#         input = Float([i] * 17)
-#         target = dr.opaque(Float, 0, dr.width(input))
-#         # target = dr.empty(Float, dr.width(input))
-#         dr.eval(target)
-#         result = toy2(input, target)
-#         assert dr.allclose(target, 0.5 + input)
-#         assert result is None
-#
-#     # 3. DRJIT_STRUCT as input and returning nested dictionaries
-#     @dr.freeze
-#     def toy3(x: Float, y: ToyDataclass) -> Float:
-#         x_d = dr.detach(x, preserve_type=False)
-#         return {
-#             "a": x,
-#             "b": (x, UInt32(2 * y.a + y.b)),
-#             "c": None,
-#             "d": {
-#                 "d1": x + x,
-#                 "d2": Array3f(x_d, -x_d, 2 * x_d),
-#                 "d3": None,
-#                 "d4": {},
-#                 "d5": tuple(),
-#                 "d6": list(),
-#                 "d7": ToyDataclass(a=x, b=2 * x),
-#             },
-#             "e": [x, {"e1": None}],
-#         }
-#
-#     for i in range(3):
-#         input = Float([i] * 5)
-#         input2 = ToyDataclass(a=input, b=Float(4.0))
-#         result = toy3(input, input2)
-#         assert isinstance(result, dict)
-#         assert isinstance(result["a"], Float)
-#         assert isinstance(result["b"], tuple)
-#         assert isinstance(result["b"][0], Float)
-#         assert isinstance(result["b"][1], UInt32)
-#         assert result["c"] is None
-#         assert isinstance(result["d"], dict)
-#         assert isinstance(result["d"]["d1"], Float)
-#         assert isinstance(result["d"]["d2"], Array3f)
-#         assert result["d"]["d3"] is None
-#         assert isinstance(result["d"]["d4"], dict) and len(result["d"]["d4"]) == 0
-#         assert isinstance(result["d"]["d5"], tuple) and len(result["d"]["d5"]) == 0
-#         assert isinstance(result["d"]["d6"], list) and len(result["d"]["d6"]) == 0
-#         assert isinstance(result["d"]["d7"], ToyDataclass)
-#         assert dr.allclose(result["d"]["d7"].a, input)
-#         assert dr.allclose(result["d"]["d7"].b, 2 * input)
-#         assert isinstance(result["e"], list)
-#         assert isinstance(result["e"][0], Float)
-#         assert isinstance(result["e"][1], dict)
-#         assert result["e"][1]["e1"] is None
+@pytest.mark.parametrize("struct_style", ["drjit", "dataclass"])
+@pytest.test_arrays("float32, jit, cuda, shape=(*)")
+def test28_return_types(t, struct_style):
+    mod = sys.modules[t.__module__]
+    Float = t
+    Array3f = mod.Array3f
+    UInt32 = mod.UInt32
+
+    import numpy as np
+
+    if struct_style == "drjit":
+
+        class ToyDataclass:
+            DRJIT_STRUCT: dict = {"a": Float, "b": Float}
+            a: Float
+            b: Float
+
+            def __init__(self, a=None, b=None):
+                self.a = a
+                self.b = b
+
+    else:
+        assert struct_style == "dataclass"
+
+        @dataclass(kw_only=True, frozen=True)
+        class ToyDataclass:
+            a: Float
+            b: Float
+
+    # 1. Many different types
+    @dr.freeze
+    def toy1(x: Float) -> Float:
+        y = x**2 + dr.sin(x)
+        z = x**2 + dr.cos(x)
+        return (x, y, z, ToyDataclass(a=x, b=y), {"x": x, "yi": UInt32(y)}, [[[[x]]]])
+
+    for i in range(3):
+        input = Float(np.full(17, i))
+        result = toy1(input)
+        assert isinstance(result[0], Float)
+        assert isinstance(result[1], Float)
+        assert isinstance(result[2], Float)
+        assert isinstance(result[3], ToyDataclass)
+        assert isinstance(result[4], dict)
+        assert result[4].keys() == set(("x", "yi"))
+        assert isinstance(result[4]["x"], Float)
+        assert isinstance(result[4]["yi"], UInt32)
+        assert isinstance(result[5], list)
+        assert isinstance(result[5][0], list)
+        assert isinstance(result[5][0][0], list)
+        assert isinstance(result[5][0][0][0], list)
+
+    # 2. Many different types
+    @dr.freeze
+    def toy2(x: Float, target: Float) -> Float:
+        dr.scatter(target, 0.5 + x, dr.arange(UInt32, dr.width(x)))
+        return None
+
+    for i in range(3):
+        input = Float([i] * 17)
+        target = dr.opaque(Float, 0, dr.width(input))
+        # target = dr.empty(Float, dr.width(input))
+        dr.eval(target)
+        result = toy2(input, target)
+        assert dr.allclose(target, 0.5 + input)
+        assert result is None
+
+    # 3. DRJIT_STRUCT as input and returning nested dictionaries
+    @dr.freeze
+    def toy3(x: Float, y: ToyDataclass) -> Float:
+        x_d = dr.detach(x, preserve_type=False)
+        return {
+            "a": x,
+            "b": (x, UInt32(2 * y.a + y.b)),
+            "c": None,
+            "d": {
+                "d1": x + x,
+                "d2": Array3f(x_d, -x_d, 2 * x_d),
+                "d3": None,
+                "d4": {},
+                "d5": tuple(),
+                "d6": list(),
+                "d7": ToyDataclass(a=x, b=2 * x),
+            },
+            "e": [x, {"e1": None}],
+        }
+
+    for i in range(3):
+        input = Float([i] * 5)
+        input2 = ToyDataclass(a=input, b=Float(4.0))
+        result = toy3(input, input2)
+        assert isinstance(result, dict)
+        assert isinstance(result["a"], Float)
+        assert isinstance(result["b"], tuple)
+        assert isinstance(result["b"][0], Float)
+        assert isinstance(result["b"][1], UInt32)
+        assert result["c"] is None
+        assert isinstance(result["d"], dict)
+        assert isinstance(result["d"]["d1"], Float)
+        assert isinstance(result["d"]["d2"], Array3f)
+        assert result["d"]["d3"] is None
+        assert isinstance(result["d"]["d4"], dict) and len(result["d"]["d4"]) == 0
+        assert isinstance(result["d"]["d5"], tuple) and len(result["d"]["d5"]) == 0
+        assert isinstance(result["d"]["d6"], list) and len(result["d"]["d6"]) == 0
+        assert isinstance(result["d"]["d7"], ToyDataclass)
+        assert dr.allclose(result["d"]["d7"].a, input)
+        assert dr.allclose(result["d"]["d7"].b, 2 * input)
+        assert isinstance(result["e"], list)
+        assert isinstance(result["e"][0], Float)
+        assert isinstance(result["e"][1], dict)
+        assert result["e"][1]["e1"] is None
