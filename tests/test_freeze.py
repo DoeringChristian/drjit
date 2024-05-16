@@ -3,7 +3,7 @@ import pytest
 from dataclasses import dataclass
 import sys
 
-dr.set_log_level(dr.LogLevel.Error)
+dr.set_log_level(dr.LogLevel.Debug)
 
 
 def get_single_entry(x):
@@ -1008,9 +1008,9 @@ def test28_return_types(t, struct_style):
 
     for i in range(3):
         input = Float([i] * 17)
-        target = dr.opaque(Float, 0, dr.width(input))
-        # target = dr.empty(Float, dr.width(input))
-        dr.eval(target)
+        # target = dr.opaque(Float, 0, dr.width(input))
+        # target = dr.full(Float, 0, dr.width(input))
+        target = dr.empty(Float, dr.width(input))
         result = toy2(input, target)
         assert dr.allclose(target, 0.5 + input)
         assert result is None
