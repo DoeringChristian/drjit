@@ -3,7 +3,7 @@ import pytest
 from dataclasses import dataclass
 import sys
 
-dr.set_log_level(dr.LogLevel.Info)
+dr.set_log_level(dr.LogLevel.Trace)
 
 def get_single_entry(x):
     tp = type(x)
@@ -575,3 +575,120 @@ def test17_no_inputs(t):
 
     assert dr.allclose(res1, res2)
     assert dr.allclose(res1, res3)
+
+    
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test18_with_gathers(t):
+    import numpy as np
+
+    n = 20
+    mod = sys.modules[t.__module__]
+    UInt32 = mod.UInt32
+    # dr.set_log_level(dr.LogLevel.Debug)
+
+    rng = np.random.default_rng(seed=1234)
+    shape = tuple(reversed(dr.shape(dr.zeros(t, n))))
+
+    def fun(x, idx):
+        active = idx % 2 != 0
+        source = get_single_entry(x)
+        return dr.gather(type(source), source, idx, active=active)
+
+    fun_frozen = dr.freeze(fun)
+
+    # 1. Recording call
+    x1 = t(rng.uniform(low=-1, high=1, size=shape))
+    idx1 = dr.arange(UInt32, n)
+    result1 = fun_frozen(x1, idx1)
+    assert dr.allclose(result1, fun(x1, idx1))
+
+    # 2. Different source as during recording
+    x2 = t(rng.uniform(low=-2, high=-1, size=shape))
+    idx2 = idx1
+
+    result2 = fun_frozen(x2, idx2)
+    assert dr.allclose(result2, fun(x2, idx2))
+
+    x3 = x2
+    idx3 = UInt32([i for i in reversed(range(n))])
+    result3 = fun_frozen(x3, idx3)
+    assert dr.allclose(result3, fun(x3, idx3))
+
+    # 3. Same source as during recording
+    result4 = fun_frozen(x1, idx1)
+    assert dr.allclose(result4, result1)
+    
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test20_scatter_with_op(t):
+    import numpy as np
+
+    n = 20
+    mod = sys.modules[t.__module__]
+    UInt32 = mod.UInt32
+    
+    rng = np.random.default_rng(seed=1234)
+
+    def func(x, idx):
+        active = idx % 2 != 0
+
+        result = x - 0.5
+        dr.scatter(x, result, idx, active = active)
+        dr.eval((x, idx, result))
+        print(f"{x.index=}")
+        print(f"{x.state=}")
+        return result
+
+    func_frozen = dr.freeze(func)
+
+    # 1. Recording call
+    # print('-------------------- start result1')
+    x1 = t(rng.uniform(low=-1, high=1, size=[n]))
+    print(f"{x1.index=}")
+    x1_copy = t(x1)
+    x1_copy_copy = t(x1)
+    idx1 = dr.arange(UInt32, n)
+    
+    result1 = func_frozen(x1, idx1)
+
+    assert dr.allclose(result1, func(x1_copy, idx1))
+    
+    # 2. Different source as during recording
+    # print('-------------------- start result2')
+    # TODO: problem: during trace, the actual x1 Python variable changes
+    #       from index r2 to index r12 as a result of the `scatter`.
+    #       But in subsequent launches, even if we successfully create a new
+    #       output buffer equivalent to r12, it doesn't get assigned to `x2`.
+    x2 = t(rng.uniform(low=-2, high=-1, size=[n]))
+    x2_copy = t(x2)
+    idx2 = idx1
+    # print(f'Before: {x2.index=}, {idx2.index=}')
+
+    result2 = func_frozen(x2, idx2)
+    # print(f'After : {x2.index=}, {idx2.index=}')
+    # print('-------------------- done with result2')
+    assert dr.allclose(result2, func(x2_copy, idx2))
+
+
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test_test(t):
+    import numpy as np
+
+    n = 20
+    mod = sys.modules[t.__module__]
+    UInt32 = mod.UInt32
+    rng = np.random.default_rng(seed=1234)
+    
+    def func(x, idx):
+        active = idx % 2 != 0
+
+        result = x - 0.5
+        dr.scatter(x, result, idx, active = active)
+        dr.eval(x)
+        print(f"{x.state=}")
+        return result
+
+    x1 = t(rng.uniform(low=-1, high=1, size=[n]))
+    idx1 = dr.arange(UInt32, n)
+    result1 = func(x1, idx1)
+    print(result1)
+    print(x1)
