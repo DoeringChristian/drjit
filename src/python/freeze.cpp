@@ -1,8 +1,10 @@
 
 #include "freeze.h"
+#include "apply.h"
 #include "base.h"
 #include "common.h"
 #include "drjit-core/jit.h"
+#include "drjit/array_router.h"
 #include "drjit/extra.h"
 #include "eval.h"
 #include "listobject.h"
@@ -30,15 +32,20 @@ struct Layout {
     /// Optional drjit type of the variable
     VarType vt = VarType::Void;
     /// Optional evaluation state of the variable
-    VarState vs = VarState::Undefined;
+    VarState vs = VarState::Invalid;
     /// Weather the variable is an array with a single entry.
     /// Such arrays are handled differently by the compiler.
     bool singleton_array = false;
     /// The literal data
-    void *literal = nullptr;
+    uint64_t literal = 0;
     /// The index in the flat_variables array of this variable.
     /// This can be used to determine aliasing.
     uint32_t index = 0;
+
+    /// If a non drjit type is passed as function arguments or result, we simply
+    /// cache it here.
+    /// TODO: possibly do the same for literals?
+    nb::object py_object = nb::none();
 
     bool operator==(const Layout &rhs) const {
         if (!(this->type.equal(rhs.type)))
@@ -60,6 +67,8 @@ struct Layout {
         if (this->index != rhs.index)
             return false;
         if (this->literal != rhs.literal)
+            return false;
+        if (!this->py_object.equal(rhs.py_object))
             return false;
         return true;
     }
@@ -118,8 +127,7 @@ struct FlatVariables {
 
         if (it == this->index_to_flat.end()) {
             uint32_t flat_index = this->variables.size();
-            jit_log(LogLevel::Info,
-                    "    aliasing var(%u) -> flat_var(%u)",
+            jit_log(LogLevel::Info, "    aliasing var(%u) -> flat_var(%u)",
                     variable_index, flat_index);
 
             this->variables.push_back(variable_index);
@@ -165,7 +173,8 @@ struct FlatVariables {
         raise_if(ad_grad_enabled(index), "Passing gradients into/out of a "
                                          "frozen function is not supported!");
 
-        jit_log(LogLevel::Info, "collect(): collecting var(%u, backend=%u)", index, var_backend);
+        jit_log(LogLevel::Info, "collect(): collecting var(%u, backend=%u)",
+                index, var_backend);
         uint32_t rc = jit_var_ref(index);
         jit_log(LogLevel::Info, "    rc=%u", rc);
         if (copy_on_write && rc > 1) {
@@ -310,9 +319,16 @@ struct FlatVariables {
                 layout.type = nb::borrow<nb::type_object>(tp);
                 this->layout.push_back(layout);
             } else {
-                nb::raise("Encountered unsupported type! Only drjit types or "
-                          "composite types containing drjit variables are "
-                          "supported.");
+                jit_log(LogLevel::Warn,
+                        "traverse(): You passed a value to a frozen function, "
+                        "that could not be converted to Dr.Jit types. This is "
+                        "not recommended and the value will be cached.",
+                        nb::type_name(tp).c_str());
+
+                Layout layout;
+                layout.type = nb::borrow<nb::type_object>(tp);
+                layout.py_object = nb::borrow<nb::object>(h);
+                this->layout.push_back(layout);
             }
         } catch (nb::python_error &e) {
             nb::raise_from(e, PyExc_RuntimeError,
@@ -379,7 +395,7 @@ struct FlatVariables {
                     size = s.len(p);
                     s.init(size, p);
                 }
-                for (size_t i = 0; i < size; ++i){
+                for (size_t i = 0; i < size; ++i) {
                     result[i] = construct();
                 }
                 return result;
@@ -404,26 +420,23 @@ struct FlatVariables {
                 dict[k] = construct();
             }
             return dict;
-        } else {
-            if (nb::dict ds = get_drjit_struct(layout.type); ds.is_valid()) {
-                nb::object tmp = layout.type();
-                // TODO: validation against `ds`
-                for (auto k : layout.fields) {
-                    nb::setattr(tmp, k, construct());
-                }
-                return tmp;
-            } else if (nb::object df = get_dataclass_fields(layout.type);
-                       df.is_valid()) {
-                nb::dict dict;
-                for (auto k : layout.fields) {
-                    dict[k] = construct();
-                }
-                return layout.type(**dict);
+        } else if (nb::dict ds = get_drjit_struct(layout.type); ds.is_valid()) {
+            nb::object tmp = layout.type();
+            // TODO: validation against `ds`
+            for (auto k : layout.fields) {
+                nb::setattr(tmp, k, construct());
             }
+            return tmp;
+        } else if (nb::object df = get_dataclass_fields(layout.type);
+                   df.is_valid()) {
+            nb::dict dict;
+            for (auto k : layout.fields) {
+                dict[k] = construct();
+            }
+            return layout.type(**dict);
+        } else {
+            return layout.py_object;
         }
-        nb::raise("FlatVariables::construct(): could not reconstruct "
-                  "output variable of type %s",
-                  nb::type_name(layout.type).c_str());
     }
 };
 
@@ -507,7 +520,7 @@ struct FrozenFunction {
 
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
 
-        if (!jit_flag(JitFlag::KernelFreezing)){
+        if (!jit_flag(JitFlag::KernelFreezing)) {
             return func(*args, **kwargs);
         }
 
@@ -515,8 +528,11 @@ struct FrozenFunction {
         input.append(args);
         input.append(kwargs);
 
-        // Collect input variables and evaluate them
+        // Evaluate input variables, forcing evaluation of undefined variables
+        // schedule_force_undefined(input);
         eval(input);
+
+        // Traverse input variables
         FlatVariables in_variables(true);
         in_variables.traverse(input);
 
