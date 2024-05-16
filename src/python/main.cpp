@@ -105,6 +105,7 @@ NB_MODULE(_drjit_ext, m_) {
         .value("ScatterReduceLocal", JitFlag::ScatterReduceLocal, doc_JitFlag_ScatterReduceLocal)
         .value("SymbolicConditionals", JitFlag::SymbolicConditionals, doc_JitFlag_SymbolicConditionals)
         .value("SymbolicScope", JitFlag::SymbolicScope, doc_JitFlag_SymbolicScope)
+        .value("KernelFreezing", JitFlag::KernelFreezing, doc_JitFlag_KernelFreezing)
         .value("Default", JitFlag::Default, doc_JitFlag_Default)
 
         // Deprecated aliases
