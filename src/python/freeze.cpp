@@ -215,14 +215,13 @@ struct FlatVariables {
      */
     void traverse(nb::handle h) {
         nb::handle tp = h.type();
-        nb::print(tp);
 
         try {
             if (is_drjit_type(tp)) {
                 const ArraySupplement &s = supp(tp);
                 if (s.is_tensor) {
                     collect(h);
-                } else if (s.ndim > 1) {
+                } else if (s.ndim != 1) {
                     Py_ssize_t len = s.shape[0];
                     if (len == DRJIT_DYNAMIC)
                         len = s.len(inst_ptr(h));
@@ -372,10 +371,18 @@ struct FlatVariables {
 
             if (s.is_tensor) {
                 return construct_dr_var(layout);
-            } else if (s.ndim > 1) {
-                nb::raise("FlatVariables::construct(): dynamic sized Dr.Jit "
-                          "variables are not yet supported.");
-
+            } else if (s.ndim != 1) {
+                auto result = nb::inst_alloc_zero(layout.type);
+                dr::ArrayBase *p = inst_ptr(result);
+                size_t size = s.shape[0];
+                if (size == DRJIT_DYNAMIC) {
+                    size = s.len(p);
+                    s.init(size, p);
+                }
+                for (size_t i = 0; i < size; ++i){
+                    result[i] = construct();
+                }
+                return result;
             } else {
                 return construct_dr_var(layout);
             }
