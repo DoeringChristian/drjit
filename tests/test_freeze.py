@@ -3,7 +3,7 @@ import pytest
 from dataclasses import dataclass
 import sys
 
-dr.set_log_level(dr.LogLevel.Trace)
+dr.set_log_level(dr.LogLevel.Debug)
 
 def get_single_entry(x):
     tp = type(x)
@@ -634,8 +634,6 @@ def test20_scatter_with_op(t):
         result = x - 0.5
         dr.scatter(x, result, idx, active = active)
         dr.eval((x, idx, result))
-        print(f"{x.index=}")
-        print(f"{x.state=}")
         return result
 
     func_frozen = dr.freeze(func)
@@ -643,13 +641,13 @@ def test20_scatter_with_op(t):
     # 1. Recording call
     # print('-------------------- start result1')
     x1 = t(rng.uniform(low=-1, high=1, size=[n]))
-    print(f"{x1.index=}")
     x1_copy = t(x1)
     x1_copy_copy = t(x1)
     idx1 = dr.arange(UInt32, n)
     
     result1 = func_frozen(x1, idx1)
 
+    # assert dr.allclose(x1, x1_copy)
     assert dr.allclose(result1, func(x1_copy, idx1))
     
     # 2. Different source as during recording
@@ -667,28 +665,196 @@ def test20_scatter_with_op(t):
     # print(f'After : {x2.index=}, {idx2.index=}')
     # print('-------------------- done with result2')
     assert dr.allclose(result2, func(x2_copy, idx2))
+    # assert dr.allclose(x2, x2_copy)
 
+    x3 = x2
+    x3_copy = t(x3)
+    idx3 = UInt32([i for i in reversed(range(n))])
+    result3 = func_frozen(x3, idx3)
+    assert dr.allclose(result3, func(x3_copy, idx3))
+    # assert dr.allclose(x3, x3_copy)
 
+    # 3. Same source as during recording
+    result4 = func_frozen(x1_copy_copy, idx1)
+    assert dr.allclose(result4, result1)
+    # assert dr.allclose(x1_copy_copy, x1)
+    
 @pytest.test_arrays("float32, jit, shape=(*)")
-def test_test(t):
+def test21_with_gather_and_scatter(t):
+    # TODO: this function seems to be causing some problems with pytest,
+    # something about `repr()` being called on a weird / uninitialized JIT variable.
+    # This crash is triggered even when the test should otherwise pass.
+
     import numpy as np
 
     n = 20
     mod = sys.modules[t.__module__]
     UInt32 = mod.UInt32
+    # dr.set_log_level(dr.LogLevel.Debug)
+
     rng = np.random.default_rng(seed=1234)
-    
-    def func(x, idx):
+    shape = tuple(reversed(dr.shape(dr.zeros(t, n))))
+
+    def fun(x, idx):
         active = idx % 2 != 0
+        dest = get_single_entry(x)
 
-        result = x - 0.5
-        dr.scatter(x, result, idx, active = active)
-        dr.eval(x)
-        print(f"{x.state=}")
-        return result
+        values = dr.gather(UInt32, idx, idx, active=active)
+        values = type(dest)(values)
+        dr.scatter(dest, values, idx, active=active)
+        return dest, values
 
-    x1 = t(rng.uniform(low=-1, high=1, size=[n]))
+    fun_frozen = dr.freeze(fun)
+
+    # 1. Recording call
+    x1 = t(rng.uniform(low=-1, high=1, size=shape))
+    x1_copy = t(x1)
+    x1_copy_copy = t(x1)
     idx1 = dr.arange(UInt32, n)
-    result1 = func(x1, idx1)
-    print(result1)
-    print(x1)
+
+    result1 = fun_frozen(x1, idx1)
+    assert dr.allclose(result1, fun(x1_copy, idx1))
+    assert dr.allclose(x1, x1_copy)
+
+    # 2. Different source as during recording
+    x2 = t(rng.uniform(low=-2, high=-1, size=shape))
+    x2_copy = t(x2)
+    idx2 = idx1
+
+    result2 = fun_frozen(x2, idx2)
+    assert dr.allclose(result2, fun(x2_copy, idx2))
+    assert dr.allclose(x2, x2_copy)
+
+    x3 = x2
+    x3_copy = t(x3)
+    idx3 = UInt32([i for i in reversed(range(n))])
+    result3 = fun_frozen(x3, idx3)
+    assert dr.allclose(result3, fun(x3_copy, idx3))
+    assert dr.allclose(x3, x3_copy)
+
+    # 3. Same source as during recording
+    result4 = fun_frozen(x1_copy_copy, idx1)
+    assert dr.allclose(result4, result1)
+    assert dr.allclose(x1_copy_copy, x1)
+    
+# @pytest.mark.parametrize("relative_size", ["<", "=", ">"])
+# @pytest.mark.parametrize("relative_size", ["<"])
+# @pytest.test_arrays("float32, jit, shape=(*)")
+# def test22_gather_only_pointer_as_input(t, relative_size):
+#     
+#     mod = sys.modules[t.__module__]
+#     Array3f = mod.Array3f
+#     Float = mod.Float32
+#     UInt32 = mod.UInt32
+#     
+#     import numpy as np
+#
+#
+#     rng = np.random.default_rng(seed=1234)
+#
+#     if relative_size == "<":
+#
+#         def fun(v):
+#             idx = dr.arange(UInt32, 0, dr.width(v), 3)
+#             return Array3f(dr.gather(Float, v, idx), dr.gather(Float, v, idx + 1), dr.gather(Float, v, idx + 2))
+#
+#     elif relative_size == "=":
+#
+#         def fun(v):
+#             idx = dr.arange(UInt32, 0, dr.width(v)) // 2
+#             return Array3f(dr.gather(Float, v, idx), dr.gather(Float, v, idx + 1), dr.gather(Float, v, idx + 2))
+#
+#     elif relative_size == ">":
+#
+#         def fun(v):
+#             max_width = dr.width(v)
+#             idx = dr.arange(UInt32, 0, 5 * max_width)
+#             # TODO(!): what can we do against this literal being baked into the kernel?
+#             active = (idx + 2) < max_width
+#             return Array3f(
+#                 dr.gather(Float, v, idx, active=active),
+#                 dr.gather(Float, v, idx + 1, active=active),
+#                 dr.gather(Float, v, idx + 2, active=active),
+#             )
+#
+#     fun_freeze = dr.freeze(fun)
+#
+#     def check_results(v, result):
+#         size = v.size
+#         if relative_size == "<":
+#             expected = v.T
+#         if relative_size == "=":
+#             idx = np.arange(0, size) // 2
+#             expected = v.ravel()
+#             expected = np.stack(
+#                 [
+#                     expected[idx],
+#                     expected[idx + 1],
+#                     expected[idx + 2],
+#                 ],
+#                 axis=0,
+#             ).T
+#         elif relative_size == ">":
+#             idx = np.arange(0, 5 * size)
+#             mask = (idx + 2) < size
+#             expected = v.ravel()
+#             expected = np.stack(
+#                 [
+#                     np.where(mask, expected[(idx) % size], 0),
+#                     np.where(mask, expected[(idx + 1) % size], 0),
+#                     np.where(mask, expected[(idx + 2) % size], 0),
+#                 ],
+#                 axis=0,
+#             )
+#
+#         assert np.allclose(result.numpy(), expected)
+#
+#     # Note: Does not fail for n=1
+#     n = 7
+#     # dr.set_log_level(dr.LogLevel.Debug)
+#
+#     for i in range(3):
+#         v = rng.uniform(size=[n, 3])
+#         result = fun(Float(v.ravel()))
+#         print(f"{dr.shape(result)=}")
+#         check_results(v, result)
+#
+#     for i in range(10):
+#         if i <= 5:
+#             n_lanes = n
+#         else:
+#             n_lanes = n + i
+#
+#         print(f"{n_lanes=}")
+#         v = rng.uniform(size=[n_lanes, 3])
+#         result = fun_freeze(Float(v.ravel()))
+#         # print(f'{i=}, {n_lanes=}, {v.shape=}, {result.numpy().shape=}')
+#
+#         expected_width = {
+#             "<": n_lanes,
+#             "=": n_lanes * 3,
+#             ">": n_lanes * 3 * 5,
+#         }[relative_size]
+#
+#         # if i == 0:
+#             # assert len(fun_freeze.frozen.kernels)
+#             # for kernel in fun_freeze.frozen.kernels.values():
+#             #     assert kernel.original_input_size == n * 3
+#             #     if relative_size == "<":
+#             #         assert kernel.original_launch_size == expected_width
+#             #         assert kernel.original_launch_size_ratio == (False, 3, True)
+#             #     elif relative_size == "=":
+#             #         assert kernel.original_launch_size == expected_width
+#             #         assert kernel.original_launch_size_ratio == (False, 1, True)
+#             #     else:
+#             #         assert kernel.original_launch_size == expected_width
+#             #         assert kernel.original_launch_size_ratio == (True, 5, True)
+#
+#         print(f"{dr.shape(result)=}")
+#         assert dr.width(result) == expected_width
+#         if relative_size == ">" and n_lanes != n:
+#             pytest.xfail(
+#                 reason="The width() of the original input is baked into the kernel to compute the `active` mask during the first launch, so results are incorrect once the width changes."
+#             )
+#
+#         check_results(v, result)
