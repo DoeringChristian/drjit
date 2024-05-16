@@ -6,6 +6,7 @@ import sys
 dr.set_log_level(dr.LogLevel.Debug)
 
 
+
 def get_single_entry(x):
     tp = type(x)
     result = x
@@ -949,8 +950,9 @@ def test27_global_flag(t):
 
 
 @pytest.mark.parametrize("struct_style", ["drjit", "dataclass"])
-@pytest.test_arrays("float32, jit, cuda, shape=(*)")
+@pytest.test_arrays("float32, cuda, jit, shape=(*)")
 def test28_return_types(t, struct_style):
+    # WARN: only working on CUDA!
     mod = sys.modules[t.__module__]
     Float = t
     Array3f = mod.Array3f
@@ -1059,3 +1061,71 @@ def test28_return_types(t, struct_style):
         assert isinstance(result["e"][0], Float)
         assert isinstance(result["e"][1], dict)
         assert result["e"][1]["e1"] is None
+        
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test29_drjit_struct_and_matrix(t):
+    package = sys.modules[t.__module__]
+    Float = package.Float
+    Array4f = package.Array4f
+    Matrix4f = package.Matrix4f
+
+    class MyTransform4f:
+        DRJIT_STRUCT = {
+            "matrix": Matrix4f,
+            "inverse": Matrix4f,
+        }
+
+        def __init__(self, matrix: Matrix4f = None, inverse: Matrix4f = None):
+            self.matrix = matrix
+            self.inverse = inverse
+
+    @dataclass(kw_only=False, frozen=False)
+    class Camera:
+        to_world: MyTransform4f
+
+    @dataclass(kw_only=False, frozen=False)
+    class Batch:
+        camera: Camera
+        value: float = 0.5
+        offset: float = 0.5
+
+    @dataclass(kw_only=False, frozen=False)
+    class Result:
+        value: Float
+        constant: int = 5
+
+    def fun(batch: Batch, x: Array4f):
+        res1 = batch.camera.to_world.matrix @ x
+        res2 = batch.camera.to_world.matrix @ x + batch.offset
+        res3 = batch.value + x
+        res4 = Result(value=batch.value)
+        return res1, res2, res3, res4
+
+    fun_frozen = dr.freeze(fun)
+
+    n = 7
+    for i in range(4):
+        x = Array4f(*(dr.linspace(Float, 0, 1, n) + dr.opaque(Float, i) + k for k in range(4)))
+        mat = Matrix4f(
+            *(dr.linspace(Float, 0, 1, n) + dr.opaque(Float, i) + ii + jj for jj in range(4) for ii in range(4))
+        )
+        trafo = MyTransform4f()
+        trafo.matrix = mat
+        trafo.inverse = dr.rcp(mat)
+
+        batch = Batch(camera=Camera(to_world=trafo), value=dr.linspace(Float, -1, 0, n) - dr.opaque(Float, i))
+        # dr.eval(x, trafo, batch.value)
+
+        results = fun_frozen(batch, x)
+        expected = fun(batch, x)
+
+        assert len(results) == len(expected)
+        for result_i, (value, expected) in enumerate(zip(results, expected)):
+            print(f"{result_i}: {value=}")
+            print(f"{result_i}: {expected=}")
+
+            assert type(value) == type(expected)
+            if isinstance(value, Result):
+                value = value.value
+                expected = expected.value
+            assert dr.allclose(value, expected), str(result_i)
