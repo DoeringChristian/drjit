@@ -119,7 +119,7 @@ struct FlatVariables {
         if (it == this->index_to_flat.end()) {
             uint32_t flat_index = this->variables.size();
             jit_log(LogLevel::Info,
-                    "collect(): Adding new variable var(%u) -> flat_var(%u)",
+                    "    aliasing var(%u) -> flat_var(%u)",
                     variable_index, flat_index);
 
             this->variables.push_back(variable_index);
@@ -167,9 +167,10 @@ struct FlatVariables {
 
         jit_log(LogLevel::Info, "collect(): collecting var(%u, backend=%u)", index, var_backend);
         uint32_t rc = jit_var_ref(index);
-        jit_log(LogLevel::Info, "\trc=%u", rc);
+        jit_log(LogLevel::Info, "    rc=%u", rc);
         if (copy_on_write && rc > 1) {
             index = jit_var_copy(index);
+            jit_log(LogLevel::Info, "    created copy var(%u)", index);
             s.reset_index(index, inst_ptr(h));
             jit_var_dec_ref(index);
         }
@@ -214,6 +215,7 @@ struct FlatVariables {
      */
     void traverse(nb::handle h) {
         nb::handle tp = h.type();
+        nb::print(tp);
 
         try {
             if (is_drjit_type(tp)) {
@@ -531,7 +533,7 @@ struct FrozenFunction {
 
             nb::list output;
             output.append(result);
-            output.append(args);
+            output.append(input);
 
             eval(output);
 
@@ -570,8 +572,8 @@ struct FrozenFunction {
             out_variables.layout_index = 0;
             auto output = nb::borrow<nb::list>(out_variables.construct());
             auto result = output[0];
-            auto new_args = output[1];
-            assign(args, new_args);
+            auto new_input = output[1];
+            assign(input, new_input);
 
             // out_variables is assigned by jit_record_replay, which transfers
             // ownership to this array. Therefore, we have to dop the variables
