@@ -504,6 +504,42 @@ void assign(nb::handle dst, nb::handle src) {
     }
 }
 
+bool schedule_force_undefined(nb::handle h) {
+    bool result_ = false;
+
+    struct ScheduleCallback : TraverseCallback {
+        bool &result;
+        ScheduleCallback(bool &result) : result(result) {
+        }
+
+        void operator()(nb::handle h) override {
+            const ArraySupplement &s = supp(h.type());
+            if (s.index) {
+                uint64_t index = s.index(inst_ptr(h));
+
+                VarState vs = jit_var_state(index);
+                // Only `schdule_force` undefined and literal variables with
+                // size > 1
+                if (vs == VarState::Undefined ||
+                    (vs == VarState::Literal && jit_var_size(index) > 1)) {
+                    int rv;
+                    index = ad_var_schedule_force(index, &rv);
+
+                    if (rv)
+                        result = true;
+
+                    s.reset_index(index, inst_ptr(h));
+                    ad_var_dec_ref(index);
+                }
+            }
+        }
+    };
+
+    ScheduleCallback sc{result_};
+    traverse("drjit.schedule", sc, h);
+    return result_;
+}
+
 struct FrozenFunction {
     Recording *recording = nullptr;
     FlatVariables out_variables;
@@ -529,7 +565,7 @@ struct FrozenFunction {
         input.append(kwargs);
 
         // Evaluate input variables, forcing evaluation of undefined variables
-        // schedule_force_undefined(input);
+        schedule_force_undefined(input);
         eval(input);
 
         // Traverse input variables
