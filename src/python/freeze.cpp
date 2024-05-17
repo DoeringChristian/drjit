@@ -96,12 +96,12 @@ struct FlatVariables {
     std::vector<Layout> layout;
     JitBackend backend = JitBackend::None;
 
-    // Wether variables should be copied when their reference count is > 1
-    bool copy_on_write = true;
+    // Wether variables should be borrowed, instead of stealing them
+    bool borrow = true;
 
     FlatVariables() {
     }
-    FlatVariables(bool copy_on_write) : copy_on_write(copy_on_write) {
+    FlatVariables(bool borrow) : borrow(borrow) {
     }
 
     void clear() {
@@ -130,6 +130,11 @@ struct FlatVariables {
             jit_log(LogLevel::Info, "    aliasing var(%u) -> flat_var(%u)",
                     variable_index, flat_index);
 
+            // NOTE: an alternative to borrowing here would be to make `refcount
+            // > 1` part of the layout, which would allow us to selectively
+            // enable COW if it is necessary.
+            if (borrow)
+                jit_var_inc_ref(variable_index);
             this->variables.push_back(variable_index);
 
             this->index_to_flat.insert({variable_index, flat_index});
@@ -161,6 +166,9 @@ struct FlatVariables {
 
         uint64_t index = s.index(inst_ptr(h));
 
+        jit_log(LogLevel::Info, "collect(): collecting var(%u, backend=%u)",
+                index, var_backend);
+
         if (jit_var_type(index) == VarType::Pointer) {
             // In order to support pointer inputs,
             // we would have to get the source variable, handle the case when
@@ -172,17 +180,6 @@ struct FlatVariables {
 
         raise_if(ad_grad_enabled(index), "Passing gradients into/out of a "
                                          "frozen function is not supported!");
-
-        jit_log(LogLevel::Info, "collect(): collecting var(%u, backend=%u)",
-                index, var_backend);
-        uint32_t rc = jit_var_ref(index);
-        jit_log(LogLevel::Info, "    rc=%u", rc);
-        if (copy_on_write && rc > 1) {
-            index = jit_var_copy(index);
-            jit_log(LogLevel::Info, "    created copy var(%u)", index);
-            s.reset_index(index, inst_ptr(h));
-            jit_var_dec_ref(index);
-        }
 
         Layout layout;
         VarState vs = jit_var_state(index);
@@ -596,6 +593,8 @@ struct FrozenFunction {
 
             eval(output);
 
+            jit_log(LogLevel::Info, "Traversing output");
+
             // Pause recording before traversal as to not accedentally record
             // unwanted operations.
             jit_record_pause(backend);
@@ -617,9 +616,13 @@ struct FrozenFunction {
             jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
                     out_variables.variables.size());
 
+            in_variables.drop_variables();
+
             this->in_layout = std::move(in_variables.layout);
             return result;
         } else {
+            // Drop references to variables
+            in_variables.drop_variables();
             // TODO: report missmatch
             raise_if(this->in_layout != in_variables.layout,
                      "freeze(): Layout mismatch!");
@@ -632,6 +635,7 @@ struct FrozenFunction {
             auto output = nb::borrow<nb::list>(out_variables.construct());
             auto result = output[0];
             auto new_input = output[1];
+
             assign(input, new_input);
 
             // out_variables is assigned by jit_record_replay, which transfers
