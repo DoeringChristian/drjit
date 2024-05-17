@@ -3,8 +3,7 @@ import pytest
 from dataclasses import dataclass
 import sys
 
-dr.set_log_level(dr.LogLevel.Debug)
-
+dr.set_log_level(dr.LogLevel.Trace)
 
 
 def get_single_entry(x):
@@ -242,8 +241,8 @@ def test09_resized(t):
     o0 = func(i0, i1)
     assert dr.all(t(2, 2, 2) == o0)
 
-    i0 = dr.arange(t, 64)
-    i1 = dr.arange(t, 64)
+    i0 = dr.arange(t, 64) + dr.opaque(t, 0)
+    i1 = dr.arange(t, 64) + dr.opaque(t, 0)
     r0 = i0 + i1
     dr.eval(i0, i1, r0)
 
@@ -622,66 +621,101 @@ def test18_with_gathers(t):
     assert dr.allclose(result4, result1)
 
 
-# @pytest.test_arrays("float32, jit, shape=(*)")
-# def test20_scatter_with_op(t):
-#     import numpy as np
-#
-#     n = 20
-#     mod = sys.modules[t.__module__]
-#     UInt32 = mod.UInt32
-#
-#     rng = np.random.default_rng(seed=1234)
-#
-#     def func(x, idx):
-#         active = idx % 2 != 0
-#
-#         result = x - 0.5
-#         dr.scatter(x, result, idx, active=active)
-#         dr.eval((x, idx, result))
-#         return result
-#
-#     func_frozen = dr.freeze(func)
-#
-#     # 1. Recording call
-#     # print('-------------------- start result1')
-#     x1 = t(rng.uniform(low=-1, high=1, size=[n]))
-#     x1_copy = t(x1)
-#     x1_copy_copy = t(x1)
-#     idx1 = dr.arange(UInt32, n)
-#
-#     result1 = func_frozen(x1, idx1)
-#
-#     # assert dr.allclose(x1, x1_copy)
-#     assert dr.allclose(result1, func(x1_copy, idx1))
-#
-#     # 2. Different source as during recording
-#     # print('-------------------- start result2')
-#     # TODO: problem: during trace, the actual x1 Python variable changes
-#     #       from index r2 to index r12 as a result of the `scatter`.
-#     #       But in subsequent launches, even if we successfully create a new
-#     #       output buffer equivalent to r12, it doesn't get assigned to `x2`.
-#     x2 = t(rng.uniform(low=-2, high=-1, size=[n]))
-#     x2_copy = t(x2)
-#     idx2 = idx1
-#     # print(f'Before: {x2.index=}, {idx2.index=}')
-#
-#     result2 = func_frozen(x2, idx2)
-#     # print(f'After : {x2.index=}, {idx2.index=}')
-#     # print('-------------------- done with result2')
-#     assert dr.allclose(result2, func(x2_copy, idx2))
-#     # assert dr.allclose(x2, x2_copy)
-#
-#     x3 = x2
-#     x3_copy = t(x3)
-#     idx3 = UInt32([i for i in reversed(range(n))])
-#     result3 = func_frozen(x3, idx3)
-#     assert dr.allclose(result3, func(x3_copy, idx3))
-#     # assert dr.allclose(x3, x3_copy)
-#
-#     # 3. Same source as during recording
-#     result4 = func_frozen(x1_copy_copy, idx1)
-#     assert dr.allclose(result4, result1)
-#     # assert dr.allclose(x1_copy_copy, x1)
+@pytest.test_arrays("float32, cuda, jit, shape=(*)")
+def test20_scatter_with_op(t):
+    import numpy as np
+
+    n = 16
+    mod = sys.modules[t.__module__]
+    UInt32 = mod.UInt32
+
+    rng = np.random.default_rng(seed=1234)
+
+    def func(x, idx):
+        active = idx % 2 != 0
+
+        result = x - 0.5
+        dr.scatter(x, result, idx, active=active)
+        return result
+
+    func_frozen = dr.freeze(func)
+
+    # 1. Recording call
+    print("-------------------- start result1")
+    x1 = t(rng.uniform(low=-1, high=1, size=[n]))
+    x1_copy = t(x1)
+    x1_copy_copy = t(x1)
+    idx1 = dr.arange(UInt32, n)
+
+    result1 = func_frozen(x1, idx1)
+
+    # assert dr.allclose(x1, x1_copy)
+    assert dr.allclose(result1, func(x1_copy, idx1))
+
+    # 2. Different source as during recording
+    print("-------------------- start result2")
+    # TODO: problem: during trace, the actual x1 Python variable changes
+    #       from index r2 to index r12 as a result of the `scatter`.
+    #       But in subsequent launches, even if we successfully create a new
+    #       output buffer equivalent to r12, it doesn't get assigned to `x2`.
+    x2 = t(rng.uniform(low=-2, high=-1, size=[n]))
+    x2_copy = t(x2)
+    idx2 = idx1
+    # print(f'Before: {x2.index=}, {idx2.index=}')
+
+    result2 = func_frozen(x2, idx2)
+    # print(f'After : {x2.index=}, {idx2.index=}')
+    print("-------------------- done with result2")
+    assert dr.allclose(result2, func(x2_copy, idx2))
+    # assert dr.allclose(x2, x2_copy)
+
+    x3 = x2
+    x3_copy = t(x3)
+    idx3 = UInt32([i for i in reversed(range(n))])
+    result3 = func_frozen(x3, idx3)
+    assert dr.allclose(result3, func(x3_copy, idx3))
+    # assert dr.allclose(x3, x3_copy)
+
+    print("=====================================")
+    # # 3. Same source as during recording
+    result4 = func_frozen(x1_copy_copy, idx1)
+    assert dr.allclose(result4, result1)
+    # # assert dr.allclose(x1_copy_copy, x1)
+
+
+@pytest.test_arrays("float32, llvm, jit, shape=(*)")
+def test_segv(t):
+    import numpy as np
+
+    n = 16
+    mod = sys.modules[t.__module__]
+    UInt32 = mod.UInt32
+
+    rng = np.random.default_rng(seed=1234)
+
+    def func(x):
+        idx = dr.arange(UInt32, dr.width(x))
+        dr.set_label(x, "x1")
+        dr.set_label(idx, "idx")
+        active = idx % 2 != 0
+        dr.set_label(active, "active")
+
+        result = x - 0.5
+        dr.set_label(result, "result")
+        dr.scatter(x, result, idx, active=active)
+        dr.set_label(x, "x2")
+
+    func_frozen = dr.freeze(func)
+
+    print("-------------------- start result1")
+    x0 = t(rng.uniform(low=-1, high=1, size=[n]))
+    # x1 = t(x0)
+    x1 = x0
+    x2 = t(x1)
+
+    result1 = func_frozen(x1)
+
+    result2 = func_frozen(x2)
 
 
 @pytest.test_arrays("float32, jit, shape=(*)")
@@ -746,7 +780,6 @@ def test21_with_gather_and_scatter(t):
 @pytest.mark.parametrize("relative_size", ["<", "=", ">"])
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test22_gather_only_pointer_as_input(t, relative_size):
-
     mod = sys.modules[t.__module__]
     Array3f = mod.Array3f
     Float = mod.Float32
@@ -871,7 +904,6 @@ def test22_gather_only_pointer_as_input(t, relative_size):
 
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test24_multiple_kernels(t):
-
     def fn(x: dr.ArrayBase, y: dr.ArrayBase, flag: bool):
         # TODO: test with gathers and scatters, which is a really important use-case.
         # TODO: test with launches of different sizes (including the auto-sizing logic)
@@ -950,7 +982,7 @@ def test27_global_flag(t):
 
 
 @pytest.mark.parametrize("struct_style", ["drjit", "dataclass"])
-@pytest.test_arrays("float32, cuda, jit, shape=(*)")
+@pytest.test_arrays("float32, jit, shape=(*)")
 def test28_return_types(t, struct_style):
     # WARN: only working on CUDA!
     mod = sys.modules[t.__module__]
@@ -979,6 +1011,8 @@ def test28_return_types(t, struct_style):
             a: Float
             b: Float
 
+    print("T1")
+
     # 1. Many different types
     @dr.freeze
     def toy1(x: Float) -> Float:
@@ -987,7 +1021,10 @@ def test28_return_types(t, struct_style):
         return (x, y, z, ToyDataclass(a=x, b=y), {"x": x, "yi": UInt32(y)}, [[[[x]]]])
 
     for i in range(3):
-        input = Float(np.full(17, i))
+        # input = Float(np.full(17, i))
+        input = dr.full(Float, i, 17)
+        print(f"{input.index=}")
+        print(f"{input=}")
         result = toy1(input)
         assert isinstance(result[0], Float)
         assert isinstance(result[1], Float)
@@ -1002,6 +1039,8 @@ def test28_return_types(t, struct_style):
         assert isinstance(result[5][0][0], list)
         assert isinstance(result[5][0][0][0], list)
 
+    print("T2")
+
     # 2. Many different types
     @dr.freeze
     def toy2(x: Float, target: Float) -> Float:
@@ -1010,12 +1049,15 @@ def test28_return_types(t, struct_style):
 
     for i in range(3):
         input = Float([i] * 17)
-        # target = dr.opaque(Float, 0, dr.width(input))
+        target = dr.opaque(Float, 0, dr.width(input))
         # target = dr.full(Float, 0, dr.width(input))
-        target = dr.empty(Float, dr.width(input))
+        # target = dr.empty(Float, dr.width(input))
+
         result = toy2(input, target)
         assert dr.allclose(target, 0.5 + input)
         assert result is None
+
+    print("T3")
 
     # 3. DRJIT_STRUCT as input and returning nested dictionaries
     @dr.freeze
@@ -1061,7 +1103,8 @@ def test28_return_types(t, struct_style):
         assert isinstance(result["e"][0], Float)
         assert isinstance(result["e"][1], dict)
         assert result["e"][1]["e1"] is None
-        
+
+
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test29_drjit_struct_and_matrix(t):
     package = sys.modules[t.__module__]
@@ -1105,15 +1148,24 @@ def test29_drjit_struct_and_matrix(t):
 
     n = 7
     for i in range(4):
-        x = Array4f(*(dr.linspace(Float, 0, 1, n) + dr.opaque(Float, i) + k for k in range(4)))
+        x = Array4f(
+            *(dr.linspace(Float, 0, 1, n) + dr.opaque(Float, i) + k for k in range(4))
+        )
         mat = Matrix4f(
-            *(dr.linspace(Float, 0, 1, n) + dr.opaque(Float, i) + ii + jj for jj in range(4) for ii in range(4))
+            *(
+                dr.linspace(Float, 0, 1, n) + dr.opaque(Float, i) + ii + jj
+                for jj in range(4)
+                for ii in range(4)
+            )
         )
         trafo = MyTransform4f()
         trafo.matrix = mat
         trafo.inverse = dr.rcp(mat)
 
-        batch = Batch(camera=Camera(to_world=trafo), value=dr.linspace(Float, -1, 0, n) - dr.opaque(Float, i))
+        batch = Batch(
+            camera=Camera(to_world=trafo),
+            value=dr.linspace(Float, -1, 0, n) - dr.opaque(Float, i),
+        )
         # dr.eval(x, trafo, batch.value)
 
         results = fun_frozen(batch, x)
