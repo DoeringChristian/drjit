@@ -170,7 +170,7 @@ struct FlatVariables {
         }
     }
 
-    void collect(nb::handle h) {
+    void add_flat_dr_var(nb::handle h) {
         auto s = supp(h.type());
 
         JitBackend var_backend = (JitBackend)s.backend;
@@ -228,6 +228,15 @@ struct FlatVariables {
         this->layout.push_back(layout);
     }
 
+    void add_dr_var(nb::handle h) {
+        nb::handle tp = h.type();
+
+        // Layout layout;
+        // layout.type = nb::borrow<nb::type_object>(tp);
+        // this->layout.push_back(layout);
+        add_flat_dr_var(h);
+    }
+
     /**
      * Traverses a PyTree in DFS order, and records it's layout in the
      * `layout` vector.
@@ -247,7 +256,7 @@ struct FlatVariables {
             if (is_drjit_type(tp)) {
                 const ArraySupplement &s = supp(tp);
                 if (s.is_tensor) {
-                    collect(h);
+                    add_dr_var(h);
                 } else if (s.ndim != 1) {
                     Py_ssize_t len = s.shape[0];
                     if (len == DRJIT_DYNAMIC)
@@ -261,7 +270,7 @@ struct FlatVariables {
                     for (Py_ssize_t i = 0; i < len; ++i)
                         traverse(nb::steal(s.item(h.ptr(), i)));
                 } else {
-                    collect(h);
+                    add_dr_var(h);
                 }
             } else if (tp.is(&PyTuple_Type)) {
                 nb::tuple tuple = nb::borrow<nb::tuple>(h);
@@ -538,8 +547,10 @@ bool schedule_force_undefined(nb::handle h) {
                 VarState vs = jit_var_state(index);
                 // Only `schdule_force` undefined and literal variables with
                 // size > 1
-                if (vs == VarState::Undefined ||
-                    (vs == VarState::Literal && jit_var_size(index) > 1)) {
+                if (vs == VarState::Undefined || (vs == VarState::Literal)) {
+                    // if (vs == VarState::Undefined ||
+                    //     (vs == VarState::Literal && jit_var_size(index) > 1))
+                    //     {
                     int rv;
                     index = ad_var_schedule_force(index, &rv);
 
@@ -678,12 +689,10 @@ void export_freeze(nb::module_ &m) {
     m.def("freeze", &freeze, doc_freeze);
     nb::class_<FrozenFunction>(m, "FrozenFunction")
         .def("__get__",
-             [](nb::object self, nb::object instance, nb::object ownder) {
+             [](nb::object self, nb::object instance, nb::object) {
                  if (instance.is_none()) {
-                     jit_log(LogLevel::Info, "function decorator");
                      return self;
                  } else {
-                     jit_log(LogLevel::Info, "method decorator");
                      return nb::cpp_function(
                          [self, instance](nb::args args, nb::kwargs kwargs) {
                              return self(instance, *args, **kwargs);
