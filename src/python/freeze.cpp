@@ -1,10 +1,10 @@
 
 #include "freeze.h"
 #include "apply.h"
+#include "autodiff.h"
 #include "base.h"
 #include "common.h"
 #include "drjit-core/jit.h"
-#include "drjit/array_router.h"
 #include "drjit/extra.h"
 #include "eval.h"
 #include "listobject.h"
@@ -231,9 +231,6 @@ struct FlatVariables {
     void add_dr_var(nb::handle h) {
         nb::handle tp = h.type();
 
-        // Layout layout;
-        // layout.type = nb::borrow<nb::type_object>(tp);
-        // this->layout.push_back(layout);
         add_flat_dr_var(h);
     }
 
@@ -696,7 +693,7 @@ void export_freeze(nb::module_ &m) {
                      return nb::cpp_function(
                          [self, instance](nb::args args, nb::kwargs kwargs) {
                              return self(instance, *args, **kwargs);
-                         });
+             }, nb::rv_policy::copy);
                  }
              })
         .def("__call__", &FrozenFunction::operator());
