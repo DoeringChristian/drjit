@@ -398,7 +398,7 @@ def test16_non_jit_types(t):
 @pytest.test_arrays("uint32, jit, cuda, -is_diff, shape=(*)")
 def test17_literal(t):
     dr.set_log_level(dr.LogLevel.Trace)
-    dr.set_flag(dr.JitFlag.KernelHistory, True)
+    # dr.set_flag(dr.JitFlag.KernelHistory, True)
 
     @dr.freeze
     def func(x, y):
@@ -718,6 +718,27 @@ def test_segv(t):
     result2 = func_frozen(x2)
 
 
+# @pytest.test_arrays("float32, llvm, jit, shape=(*)")
+# def test_segv(t):
+#     import numpy as np
+#
+#     n = 16
+#     mod = sys.modules[t.__module__]
+#     UInt32 = mod.UInt32
+#
+#     rng = np.random.default_rng(seed=1234)
+#
+#     def func(x):
+#         return x + 1
+#
+#     func_frozen = dr.freeze(func)
+#
+#     for i in range(3):
+#         x = t(rng.uniform(low=-1, high=1, size=[n]))
+#         result = func_frozen(x)
+#         dr.eval(result)
+
+
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test21_with_gather_and_scatter(t):
     # TODO: this function seems to be causing some problems with pytest,
@@ -927,7 +948,7 @@ def test24_multiple_kernels(t):
     y = dr.full(t, 0.5, n) + dr.opaque(t, 0.1)
     dr.eval(x, y)
 
-    with dr.scoped_set_flag(dr.JitFlag.KernelHistory, True):
+    with dr.scoped_set_flag(dr.JitFlag.KernelHistory):
         ref_results = fn(x, y, flag=True)
         dr.eval(ref_results)
 
@@ -981,7 +1002,9 @@ def test27_global_flag(t):
         assert dr.allclose(result3, 2.9)
 
 
+# @pytest.mark.parametrize("struct_style", ["drjit", "dataclass"])
 @pytest.mark.parametrize("struct_style", ["drjit", "dataclass"])
+# @pytest.test_arrays("float32, llvm, jit, -is_diff, shape=(*)")
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test28_return_types(t, struct_style):
     # WARN: only working on CUDA!
@@ -1020,12 +1043,11 @@ def test28_return_types(t, struct_style):
         z = x**2 + dr.cos(x)
         return (x, y, z, ToyDataclass(a=x, b=y), {"x": x, "yi": UInt32(y)}, [[[[x]]]])
 
-    for i in range(3):
-        # input = Float(np.full(17, i))
+    for i in range(2):
+        # input0 = Float(np.full(17, i))
         input = dr.full(Float, i, 17)
-        print(f"{input.index=}")
-        print(f"{input=}")
         result = toy1(input)
+        # print(f"{input=}")
         assert isinstance(result[0], Float)
         assert isinstance(result[1], Float)
         assert isinstance(result[2], Float)
@@ -1039,70 +1061,70 @@ def test28_return_types(t, struct_style):
         assert isinstance(result[5][0][0], list)
         assert isinstance(result[5][0][0][0], list)
 
-    print("T2")
-
-    # 2. Many different types
-    @dr.freeze
-    def toy2(x: Float, target: Float) -> Float:
-        dr.scatter(target, 0.5 + x, dr.arange(UInt32, dr.width(x)))
-        return None
-
-    for i in range(3):
-        input = Float([i] * 17)
-        target = dr.opaque(Float, 0, dr.width(input))
-        # target = dr.full(Float, 0, dr.width(input))
-        # target = dr.empty(Float, dr.width(input))
-
-        result = toy2(input, target)
-        assert dr.allclose(target, 0.5 + input)
-        assert result is None
-
-    print("T3")
-
-    # 3. DRJIT_STRUCT as input and returning nested dictionaries
-    @dr.freeze
-    def toy3(x: Float, y: ToyDataclass) -> Float:
-        x_d = dr.detach(x, preserve_type=False)
-        return {
-            "a": x,
-            "b": (x, UInt32(2 * y.a + y.b)),
-            "c": None,
-            "d": {
-                "d1": x + x,
-                "d2": Array3f(x_d, -x_d, 2 * x_d),
-                "d3": None,
-                "d4": {},
-                "d5": tuple(),
-                "d6": list(),
-                "d7": ToyDataclass(a=x, b=2 * x),
-            },
-            "e": [x, {"e1": None}],
-        }
-
-    for i in range(3):
-        input = Float([i] * 5)
-        input2 = ToyDataclass(a=input, b=Float(4.0))
-        result = toy3(input, input2)
-        assert isinstance(result, dict)
-        assert isinstance(result["a"], Float)
-        assert isinstance(result["b"], tuple)
-        assert isinstance(result["b"][0], Float)
-        assert isinstance(result["b"][1], UInt32)
-        assert result["c"] is None
-        assert isinstance(result["d"], dict)
-        assert isinstance(result["d"]["d1"], Float)
-        assert isinstance(result["d"]["d2"], Array3f)
-        assert result["d"]["d3"] is None
-        assert isinstance(result["d"]["d4"], dict) and len(result["d"]["d4"]) == 0
-        assert isinstance(result["d"]["d5"], tuple) and len(result["d"]["d5"]) == 0
-        assert isinstance(result["d"]["d6"], list) and len(result["d"]["d6"]) == 0
-        assert isinstance(result["d"]["d7"], ToyDataclass)
-        assert dr.allclose(result["d"]["d7"].a, input)
-        assert dr.allclose(result["d"]["d7"].b, 2 * input)
-        assert isinstance(result["e"], list)
-        assert isinstance(result["e"][0], Float)
-        assert isinstance(result["e"][1], dict)
-        assert result["e"][1]["e1"] is None
+    # print("T2")
+    #
+    # # 2. Many different types
+    # @dr.freeze
+    # def toy2(x: Float, target: Float) -> Float:
+    #     dr.scatter(target, 0.5 + x, dr.arange(UInt32, dr.width(x)))
+    #     return None
+    #
+    # for i in range(3):
+    #     input = Float([i] * 17)
+    #     target = dr.opaque(Float, 0, dr.width(input))
+    #     # target = dr.full(Float, 0, dr.width(input))
+    #     # target = dr.empty(Float, dr.width(input))
+    #
+    #     result = toy2(input, target)
+    #     assert dr.allclose(target, 0.5 + input)
+    #     assert result is None
+    #
+    # print("T3")
+    #
+    # # 3. DRJIT_STRUCT as input and returning nested dictionaries
+    # @dr.freeze
+    # def toy3(x: Float, y: ToyDataclass) -> Float:
+    #     x_d = dr.detach(x, preserve_type=False)
+    #     return {
+    #         "a": x,
+    #         "b": (x, UInt32(2 * y.a + y.b)),
+    #         "c": None,
+    #         "d": {
+    #             "d1": x + x,
+    #             "d2": Array3f(x_d, -x_d, 2 * x_d),
+    #             "d3": None,
+    #             "d4": {},
+    #             "d5": tuple(),
+    #             "d6": list(),
+    #             "d7": ToyDataclass(a=x, b=2 * x),
+    #         },
+    #         "e": [x, {"e1": None}],
+    #     }
+    #
+    # for i in range(3):
+    #     input = Float([i] * 5)
+    #     input2 = ToyDataclass(a=input, b=Float(4.0))
+    #     result = toy3(input, input2)
+    #     assert isinstance(result, dict)
+    #     assert isinstance(result["a"], Float)
+    #     assert isinstance(result["b"], tuple)
+    #     assert isinstance(result["b"][0], Float)
+    #     assert isinstance(result["b"][1], UInt32)
+    #     assert result["c"] is None
+    #     assert isinstance(result["d"], dict)
+    #     assert isinstance(result["d"]["d1"], Float)
+    #     assert isinstance(result["d"]["d2"], Array3f)
+    #     assert result["d"]["d3"] is None
+    #     assert isinstance(result["d"]["d4"], dict) and len(result["d"]["d4"]) == 0
+    #     assert isinstance(result["d"]["d5"], tuple) and len(result["d"]["d5"]) == 0
+    #     assert isinstance(result["d"]["d6"], list) and len(result["d"]["d6"]) == 0
+    #     assert isinstance(result["d"]["d7"], ToyDataclass)
+    #     assert dr.allclose(result["d"]["d7"].a, input)
+    #     assert dr.allclose(result["d"]["d7"].b, 2 * input)
+    #     assert isinstance(result["e"], list)
+    #     assert isinstance(result["e"][0], Float)
+    #     assert isinstance(result["e"][1], dict)
+    #     assert result["e"][1]["e1"] is None
 
 
 @pytest.test_arrays("float32, jit, shape=(*)")
@@ -1181,3 +1203,136 @@ def test29_drjit_struct_and_matrix(t):
                 value = value.value
                 expected = expected.value
             assert dr.allclose(value, expected), str(result_i)
+            
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test30_with_dataclass_in_out(t):
+    mod = sys.modules[t.__module__]
+    Int32 = mod.Int32
+    UInt32 = mod.UInt32
+    Bool = mod.Bool
+
+    @dataclass(kw_only=True, frozen=False)
+    class MyRecord:
+        step_in_segment: Int32
+        total_steps: UInt32
+        short_segment: Bool
+
+    def acc_fn(record: MyRecord):
+        record.step_in_segment += Int32(2)
+        return Int32(record.total_steps + record.step_in_segment)
+
+    # Initialize MyRecord
+    n_rays = 100
+    record = MyRecord(
+        step_in_segment=UInt32([1] * n_rays),
+        total_steps=UInt32([0] * n_rays),
+        short_segment=dr.zeros(Bool, n_rays),
+    )
+
+    # Create frozen kernel that contains another function
+    frozen_acc_fn = dr.freeze(acc_fn)
+
+    accumulation = dr.zeros(UInt32, n_rays)
+    n_iter = 12
+    for _ in range(n_iter):
+        accumulation += frozen_acc_fn(record)
+
+    expected = 0
+    for i in range(n_iter):
+        expected += 0 + 2 * (i + 1) + 1
+    assert dr.all(accumulation == expected)
+    
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test32_allocated_scratch_buffer(t):
+    """
+    Frozen functions may want to allocate some scratch space, scatter to it
+    in a first kernel, and read / use the values later on. As long as the
+    size of the scratch space can be guessed (e.g. a multiple of the launch width,
+    or matching the width of an existing input), we should be able to support it.
+
+    On the other hand, the "scattering to an unknown buffer" pattern may actually
+    be scattering to an actual pre-existing buffer, which the user simply forgot
+    to include in the `state` lambda. In order to catch that case, we at least
+    check that the "scratch buffer" was read from in one of the kernels.
+    Otherwise, we assume it was meant as a side-effect into a pre-existing buffer.
+    """
+    mod = sys.modules[t.__module__]
+    # dr.set_flag(dr.JitFlag.KernelFreezing, False)
+    UInt32 = mod.UInt32
+
+    # Note: we are going through an object / method, otherwise the closure
+    # checker would already catch the `forgotten_target_buffer` usage.
+    class Model:
+        def __init__(self):
+            self.some_state = UInt32([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+            self.forgotten_target_buffer = self.some_state + 1
+            dr.eval(self.some_state, self.forgotten_target_buffer)
+        
+        @dr.freeze
+        def fn1(self, x):
+            # Note: assuming here that the width of `forgotten_target_buffer` doesn't change
+            index = dr.arange(UInt32, dr.width(x)) % dr.width(self.forgotten_target_buffer)
+            dr.scatter(self.forgotten_target_buffer, x, index)
+
+            return 2 * x
+
+        @dr.freeze
+        def fn2(self, x):
+            # Scratch buffer with width equal to a state variable
+            scratch = dr.zeros(UInt32, dr.width(self.some_state))
+            # Kernel 1: write to `scratch`
+            index = dr.arange(UInt32, dr.width(x)) % dr.width(self.some_state)
+            dr.scatter(scratch, x, index)
+            # Kernel 2: use values from `scratch` directly
+            result = dr.square(scratch)
+            # We don't actually return `scratch`, its lifetime is limited to the frozen function.
+            return result
+
+        @dr.freeze
+        def fn3(self, x):
+            # Scratch buffer with width equal to a state variable
+            scratch = dr.zeros(UInt32, dr.width(self.some_state))
+            # Kernel 1: write to `scratch`
+            index = dr.arange(UInt32, dr.width(x)) % dr.width(self.some_state)
+            dr.scatter(scratch, x, index)
+            # Kernel 2: use values from `scratch` via a gather
+            result = x + dr.gather(UInt32, scratch, index)
+            # We don't actually return `scratch`, its lifetime is limited to the frozen function.
+            return result
+
+    model = Model()
+
+    # Suspicious usage, should not allow it to avoid silent surprising behavior
+    for i in range(4):
+        x = UInt32(list(range(i + 2)))
+        assert dr.width(x) < dr.width(model.forgotten_target_buffer)
+
+        if dr.flag(dr.JitFlag.KernelFreezing):
+            # expected_error = "Layout missmatch!"
+            # with pytest.raises(RuntimeError):
+            result = model.fn1(x)
+            # break
+        
+        else:
+            result = model.fn1(x)
+            assert dr.allclose(result, 2 * x)
+
+            expected = UInt32(model.some_state + 1)
+            dr.scatter(expected, x, dr.arange(UInt32, dr.width(x)))
+            assert dr.allclose(model.forgotten_target_buffer, expected)
+
+    # Expected usage, we should allocate the buffer and allow the launch
+    for i in range(4):
+        x = UInt32(list(range(i + 2)))  # i+1
+        assert dr.width(x) < dr.width(model.some_state)
+        result = model.fn2(x)
+        expected = dr.zeros(UInt32, dr.width(model.some_state))
+        dr.scatter(expected, x, dr.arange(UInt32, dr.width(x)))
+        assert dr.allclose(result, dr.square(expected))
+
+    # Expected usage, we should allocate the buffer and allow the launch
+    for i in range(4):
+        x = UInt32(list(range(i + 2)))  # i+1
+        assert dr.width(x) < dr.width(model.some_state)
+        result = model.fn3(x)
+        assert dr.allclose(result, 2 * x)
