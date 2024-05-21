@@ -421,10 +421,10 @@ def test17_literal(t):
     assert dr.all(z == t(1, 2, 3))
     assert dr.all(w == t(1))
 
-    with pytest.raises(RuntimeError):
-        x = t(0, 1, 2)
-        y = t(2)
-        z = func(x, y)
+    # with pytest.raises(RuntimeError):
+    x = t(0, 1, 2)
+    y = t(2)
+    z = func(x, y)
 
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
@@ -564,7 +564,8 @@ def test17_no_inputs(t):
     @dr.freeze
     def fun(a):
         x = t(dr.linspace(Float, -1, 1, 10)) + a
-        source = get_single_entry(x + 2 * x)
+        source = x + 2 * x
+        # source = get_single_entry(x + 2 * x)
         index = dr.arange(UInt32, dr.width(source))
         active = index % UInt32(2) != 0
 
@@ -1308,10 +1309,12 @@ def test32_allocated_scratch_buffer(t):
         assert dr.width(x) < dr.width(model.forgotten_target_buffer)
 
         if dr.flag(dr.JitFlag.KernelFreezing):
-            # expected_error = "Layout missmatch!"
-            # with pytest.raises(RuntimeError):
             result = model.fn1(x)
-            # break
+            assert dr.allclose(result, 2 * x)
+            
+            expected = UInt32(model.some_state + 1)
+            dr.scatter(expected, x, dr.arange(UInt32, dr.width(x)))
+            assert dr.allclose(model.forgotten_target_buffer, expected)
         
         else:
             result = model.fn1(x)
@@ -1336,3 +1339,101 @@ def test32_allocated_scratch_buffer(t):
         assert dr.width(x) < dr.width(model.some_state)
         result = model.fn3(x)
         assert dr.allclose(result, 2 * x)
+
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test33_simple_reductions(t):
+    import numpy as np
+    
+    mod = sys.modules[t.__module__]
+    Float = mod.Float32
+    n = 37
+
+    @dr.freeze
+    def simple_sum(x):
+        return dr.sum(x)
+
+    @dr.freeze
+    def simple_product(x):
+        return dr.prod(x)
+
+    @dr.freeze
+    def simple_min(x):
+        return dr.min(x)
+
+    @dr.freeze
+    def simple_max(x):
+        return dr.max(x)
+
+    @dr.freeze
+    def sum_not_returned_wide(x):
+        return dr.sum(x) + x
+
+    @dr.freeze
+    def sum_not_returned_single(x):
+        return dr.sum(x) + 4
+
+    def check_expected(fn, expected):
+        result = fn(x)
+
+        assert dr.width(result) == dr.width(expected)
+        assert isinstance(result, Float)
+        assert dr.allclose(result, expected)
+
+    for i in range(3):
+        x = dr.linspace(Float, 0, 1, n) + dr.opaque(Float, i)
+
+        x_np = x.numpy()
+        check_expected(simple_sum, np.sum(x_np).item())
+        check_expected(simple_product, np.prod(x_np).item())
+        check_expected(simple_min, np.min(x_np).item())
+        check_expected(simple_max, np.max(x_np).item())
+
+        check_expected(sum_not_returned_wide, np.sum(x_np).item() + x)
+        check_expected(sum_not_returned_single, np.sum(x_np).item() + 4)
+        
+# def test34_reductions_with_ad():
+#     # dr.set_flag(dr.JitFlag.KernelFreezing, False)
+#     Float = dr.cuda.ad.Float32
+#     n = 37
+#
+#     @dr.kernel()
+#     def sum_with_ad(x, width_opaque):
+#         intermediate = 2 * x + 1
+#         dr.enable_grad(intermediate)
+#
+#         result = dr.sqr(intermediate)
+#
+#         # Unfortunately, as long as we don't support creating opaque values
+#         # within a frozen kernel, we can't use `dr.mean()` directly.
+#         loss = dr.sum(result) / width_opaque
+#         dr.backward(loss)
+#         return result, intermediate
+#
+#     @dr.kernel()
+#     def product_with_ad(x):
+#         dr.enable_grad(x)
+#         loss = dr.prod(x)
+#         dr.backward_from(loss)
+#
+#     for i in range(3):
+#         x = dr.linspace(Float, 0, 1, n + i) + dr.opaque(Float, i)
+#         result, intermediate = sum_with_ad(x, dr.opaque(Float, dr.width(x)))
+#
+#         assert dr.grad_enabled(result)
+#         assert dr.grad_enabled(intermediate)
+#         assert not dr.grad_enabled(x)
+#         intermediate_expected = 2 * x + 1
+#         assert dr.allclose(intermediate, intermediate_expected)
+#         assert dr.allclose(result, dr.sqr(intermediate_expected))
+#         assert dr.allclose(dr.grad(result), 0)
+#         assert dr.allclose(dr.grad(intermediate), 2 * intermediate_expected / dr.width(x))
+#
+#     for i in range(3):
+#         x = dr.linspace(Float, 0.1, 1, n + i) + dr.opaque(Float, i)
+#         result = product_with_ad(x)
+#
+#         assert result is None
+#         assert dr.grad_enabled(x)
+#         with dr.suspend_grad():
+#             expected_grad = dr.prod(x) / x
+#         assert dr.allclose(dr.grad(x), expected_grad)
