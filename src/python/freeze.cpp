@@ -48,28 +48,49 @@ struct Layout {
     nb::object py_object = nb::none();
 
     bool operator==(const Layout &rhs) const {
-        if (!(this->type.equal(rhs.type)))
+        if (!(this->type.equal(rhs.type))) {
+            jit_log(LogLevel::Warn, "    type");
             return false;
-        if (this->num != rhs.num)
-            return false;
-        if (this->fields.size() != rhs.fields.size())
-            return false;
-        for (uint32_t i = 0; i < this->fields.size(); ++i) {
-            if (!(this->fields[i].equal(rhs.fields[i])))
-                return false;
         }
-        if (this->vt != rhs.vt)
+        if (this->num != rhs.num) {
+            jit_log(LogLevel::Warn, "    num");
             return false;
-        if (this->vs != rhs.vs)
+        }
+        if (this->fields.size() != rhs.fields.size()) {
+            jit_log(LogLevel::Warn, "    fields.size");
             return false;
-        if (this->singleton_array != rhs.singleton_array)
+        }
+        for (uint32_t i = 0; i < this->fields.size(); ++i) {
+            if (!(this->fields[i].equal(rhs.fields[i]))) {
+                jit_log(LogLevel::Warn, "    fields[%u]", i);
+                return false;
+            }
+        }
+        if (this->vt != rhs.vt) {
+            jit_log(LogLevel::Warn, "    vt");
             return false;
-        if (this->index != rhs.index)
+        }
+        if (this->vs != rhs.vs) {
+            jit_log(LogLevel::Warn, "    vs: %u != %u", (uint32_t)this->vs,
+                    (uint32_t)rhs.vs);
             return false;
-        if (this->literal != rhs.literal)
+        }
+        if (this->singleton_array != rhs.singleton_array) {
+            jit_log(LogLevel::Warn, "    singleton_array");
             return false;
-        if (!this->py_object.equal(rhs.py_object))
+        }
+        if (this->index != rhs.index) {
+            jit_log(LogLevel::Warn, "    index");
             return false;
+        }
+        if (this->literal != rhs.literal) {
+            jit_log(LogLevel::Warn, "    literal");
+            return false;
+        }
+        if (!this->py_object.equal(rhs.py_object)) {
+            jit_log(LogLevel::Warn, "    object");
+            return false;
+        }
         return true;
     }
 };
@@ -656,5 +677,18 @@ FrozenFunction freeze(nb::callable func) {
 void export_freeze(nb::module_ &m) {
     m.def("freeze", &freeze, doc_freeze);
     nb::class_<FrozenFunction>(m, "FrozenFunction")
+        .def("__get__",
+             [](nb::object self, nb::object instance, nb::object ownder) {
+                 if (instance.is_none()) {
+                     jit_log(LogLevel::Info, "function decorator");
+                     return self;
+                 } else {
+                     jit_log(LogLevel::Info, "method decorator");
+                     return nb::cpp_function(
+                         [self, instance](nb::args args, nb::kwargs kwargs) {
+                             return self(instance, *args, **kwargs);
+                         });
+                 }
+             })
         .def("__call__", &FrozenFunction::operator());
 }
