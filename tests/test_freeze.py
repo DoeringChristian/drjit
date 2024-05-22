@@ -1204,7 +1204,8 @@ def test29_drjit_struct_and_matrix(t):
                 value = value.value
                 expected = expected.value
             assert dr.allclose(value, expected), str(result_i)
-            
+
+
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test30_with_dataclass_in_out(t):
     mod = sys.modules[t.__module__]
@@ -1242,7 +1243,8 @@ def test30_with_dataclass_in_out(t):
     for i in range(n_iter):
         expected += 0 + 2 * (i + 1) + 1
     assert dr.all(accumulation == expected)
-    
+
+
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test32_allocated_scratch_buffer(t):
     """
@@ -1266,17 +1268,20 @@ def test32_allocated_scratch_buffer(t):
     class Model:
         DRJIT_STRUCT = {
             "some_state": UInt32,
-            "forgotten_target_buffer": UInt32,
+            # "forgotten_target_buffer": UInt32,
         }
+
         def __init__(self):
             self.some_state = UInt32([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
             self.forgotten_target_buffer = self.some_state + 1
             dr.eval(self.some_state, self.forgotten_target_buffer)
-        
+
         @dr.freeze
         def fn1(self, x):
             # Note: assuming here that the width of `forgotten_target_buffer` doesn't change
-            index = dr.arange(UInt32, dr.width(x)) % dr.width(self.forgotten_target_buffer)
+            index = dr.arange(UInt32, dr.width(x)) % dr.width(
+                self.forgotten_target_buffer
+            )
             dr.scatter(self.forgotten_target_buffer, x, index)
 
             return 2 * x
@@ -1313,13 +1318,13 @@ def test32_allocated_scratch_buffer(t):
         assert dr.width(x) < dr.width(model.forgotten_target_buffer)
 
         if dr.flag(dr.JitFlag.KernelFreezing):
-            result = model.fn1(x)
-            assert dr.allclose(result, 2 * x)
-            
-            expected = UInt32(model.some_state + 1)
-            dr.scatter(expected, x, dr.arange(UInt32, dr.width(x)))
-            assert dr.allclose(model.forgotten_target_buffer, expected)
-        
+            with pytest.raises(
+                RuntimeError,
+                match="created before starting recording, but was not speciefied as input!",
+            ):
+                result = model.fn1(x)
+            break
+
         else:
             result = model.fn1(x)
             assert dr.allclose(result, 2 * x)
@@ -1328,26 +1333,27 @@ def test32_allocated_scratch_buffer(t):
             dr.scatter(expected, x, dr.arange(UInt32, dr.width(x)))
             assert dr.allclose(model.forgotten_target_buffer, expected)
 
-    # # Expected usage, we should allocate the buffer and allow the launch
-    # for i in range(4):
-    #     x = UInt32(list(range(i + 2)))  # i+1
-    #     assert dr.width(x) < dr.width(model.some_state)
-    #     result = model.fn2(x)
-    #     expected = dr.zeros(UInt32, dr.width(model.some_state))
-    #     dr.scatter(expected, x, dr.arange(UInt32, dr.width(x)))
-    #     assert dr.allclose(result, dr.square(expected))
-    #
-    # # Expected usage, we should allocate the buffer and allow the launch
-    # for i in range(4):
-    #     x = UInt32(list(range(i + 2)))  # i+1
-    #     assert dr.width(x) < dr.width(model.some_state)
-    #     result = model.fn3(x)
-    #     assert dr.allclose(result, 2 * x)
+    # Expected usage, we should allocate the buffer and allow the launch
+    for i in range(4):
+        x = UInt32(list(range(i + 2)))  # i+1
+        assert dr.width(x) < dr.width(model.some_state)
+        result = model.fn2(x)
+        expected = dr.zeros(UInt32, dr.width(model.some_state))
+        dr.scatter(expected, x, dr.arange(UInt32, dr.width(x)))
+        assert dr.allclose(result, dr.square(expected))
+
+    # Expected usage, we should allocate the buffer and allow the launch
+    for i in range(4):
+        x = UInt32(list(range(i + 2)))  # i+1
+        assert dr.width(x) < dr.width(model.some_state)
+        result = model.fn3(x)
+        assert dr.allclose(result, 2 * x)
+
 
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test33_simple_reductions(t):
     import numpy as np
-    
+
     mod = sys.modules[t.__module__]
     Float = mod.Float32
     n = 37
@@ -1394,7 +1400,8 @@ def test33_simple_reductions(t):
 
         check_expected(sum_not_returned_wide, np.sum(x_np).item() + x)
         check_expected(sum_not_returned_single, np.sum(x_np).item() + 4)
-        
+
+
 # def test34_reductions_with_ad():
 #     # dr.set_flag(dr.JitFlag.KernelFreezing, False)
 #     Float = dr.cuda.ad.Float32
