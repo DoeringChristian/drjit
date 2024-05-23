@@ -566,18 +566,103 @@ bool schedule_force_undefined(nb::handle h) {
     return result_;
 }
 
-struct FrozenFunction {
+struct FunctionRecording {
     Recording *recording = nullptr;
     FlatVariables out_variables;
-    std::vector<Layout> in_layout;
-    nb::callable func;
 
-    FrozenFunction(nb::callable func) : out_variables(false), func(func) {
+    FunctionRecording() : out_variables(false) {
     }
-    ~FrozenFunction() {
+    /*
+     * Record a function, given it's python input and flattened input.
+     */
+    nb::object record(nb::callable func, nb::list input,
+                      const FlatVariables &in_variables) {
+        JitBackend backend = in_variables.backend;
+
+        jit_log(LogLevel::Info,
+                "Recording (n_inputs=%u):", in_variables.variables.size());
+        jit_record_start(backend, in_variables.variables.data(),
+                         in_variables.variables.size());
+
+        // Record the function
+        bool tmp = jit_flag(JitFlag::KernelFreezing);
+        jit_set_flag(JitFlag::KernelFreezing, false);
+        auto result = func(*input[0], **input[1]);
+        jit_set_flag(JitFlag::KernelFreezing, tmp);
+
+        nb::list output;
+        output.append(result);
+        output.append(input);
+
+        eval(output);
+
+        jit_log(LogLevel::Info, "Traversing output");
+
+        // Pause recording before traversal as to not accedentally record
+        // unwanted operations.
+        jit_record_pause(backend);
+
+        out_variables.traverse(output);
+
+        raise_if((out_variables.variables.size() > 0 &&
+                  in_variables.variables.size() > 0) &&
+                     out_variables.backend != backend,
+                 "freeze(): backend missmatch error (backend %u of "
+                 "output "
+                 "variables did not match backend %u of input "
+                 "variables)",
+                 (uint32_t)out_variables.backend, (uint32_t)backend);
+
+        recording = jit_record_stop(backend, out_variables.variables.data(),
+                                    out_variables.variables.size());
+
+        jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
+                out_variables.variables.size());
+
+        return result;
+    }
+    /*
+     * Replays the recording.
+     *
+     * This constructs the output and re-assigns the input.
+     */
+    nb::object replay(const FlatVariables &in_variables, nb::list input) {
+
+        jit_log(LogLevel::Info, "Replaying:");
+        jit_record_replay(recording, in_variables.variables.data(),
+                          out_variables.variables.data());
+        jit_log(LogLevel::Info, "Replaying done:");
+
+        out_variables.layout_index = 0;
+        auto output = nb::borrow<nb::list>(out_variables.construct());
+        auto result = output[0];
+        auto new_input = output[1];
+
+        assign(input, new_input);
+
+        // out_variables is assigned by jit_record_replay, which transfers
+        // ownership to this array. Therefore, we have to drop the variables
+        // afterwards.
+        out_variables.drop_variables();
+
+        return result;
+    }
+    ~FunctionRecording() {
         if (this->recording) {
             jit_record_destroy(this->recording);
         }
+    }
+};
+
+struct FrozenFunction {
+    std::vector<Layout> in_layout;
+    nb::callable func;
+
+    FunctionRecording recording;
+
+    FrozenFunction(nb::callable func) : func(func) {
+    }
+    ~FrozenFunction() {
     }
 
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
@@ -602,48 +687,9 @@ struct FrozenFunction {
                  "freeze(): Cannot infer backend without providing input "
                  "variable to frozen functin!");
 
-        JitBackend backend = in_variables.backend;
+        if (this->recording.recording == nullptr) {
 
-        if (recording == nullptr) {
-            jit_log(LogLevel::Info,
-                    "Recording (n_inputs=%u):", in_variables.variables.size());
-            jit_record_start(backend, in_variables.variables.data(),
-                             in_variables.variables.size());
-
-            // Record the function
-            bool tmp = jit_flag(JitFlag::KernelFreezing);
-            jit_set_flag(JitFlag::KernelFreezing, false);
-            auto result = func(*args, **kwargs);
-            jit_set_flag(JitFlag::KernelFreezing, tmp);
-
-            nb::list output;
-            output.append(result);
-            output.append(input);
-
-            eval(output);
-
-            jit_log(LogLevel::Info, "Traversing output");
-
-            // Pause recording before traversal as to not accedentally record
-            // unwanted operations.
-            jit_record_pause(backend);
-
-            out_variables.traverse(output);
-
-            raise_if((out_variables.variables.size() > 0 &&
-                      in_variables.variables.size() > 0) &&
-                         out_variables.backend != backend,
-                     "freeze(): backend missmatch error (backend %u of "
-                     "output "
-                     "variables did not match backend %u of input "
-                     "variables)",
-                     (uint32_t)out_variables.backend, (uint32_t)backend);
-
-            recording = jit_record_stop(backend, out_variables.variables.data(),
-                                        out_variables.variables.size());
-
-            jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
-                    out_variables.variables.size());
+            auto result = this->recording.record(func, input, in_variables);
 
             in_variables.drop_variables();
 
@@ -652,27 +698,14 @@ struct FrozenFunction {
         } else {
             // Drop references to variables
             in_variables.drop_variables();
+
             // TODO: report missmatch
             raise_if(this->in_layout != in_variables.layout,
                      "freeze(): Layout mismatch!");
-            jit_log(LogLevel::Info, "Replaying:");
-            jit_record_replay(recording, in_variables.variables.data(),
-                              out_variables.variables.data());
-            jit_log(LogLevel::Info, "Replaying done:");
 
-            out_variables.layout_index = 0;
-            auto output = nb::borrow<nb::list>(out_variables.construct());
-            auto result = output[0];
-            auto new_input = output[1];
+            auto result = this->recording.replay(in_variables, input);
 
-            assign(input, new_input);
-
-            // out_variables is assigned by jit_record_replay, which transfers
-            // ownership to this array. Therefore, we have to dop the variables
-            // afterwards.
-            out_variables.drop_variables();
-
-            return output[0];
+            return result;
         }
     }
 };
@@ -693,7 +726,8 @@ void export_freeze(nb::module_ &m) {
                      return nb::cpp_function(
                          [self, instance](nb::args args, nb::kwargs kwargs) {
                              return self(instance, *args, **kwargs);
-             }, nb::rv_policy::copy);
+                         },
+                         nb::rv_policy::copy);
                  }
              })
         .def("__call__", &FrozenFunction::operator());
