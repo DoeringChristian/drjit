@@ -202,7 +202,7 @@ def test07_scatter(t):
     assert dr.all(t(0, 1, 2) == w)
 
 
-@pytest.test_arrays("float32, is_diff, shape=(*)")
+@pytest.test_arrays("float32, jit, cuda, is_diff, shape=(*)")
 def test08_optimization(t):
     @dr.freeze
     def func(state, ref):
