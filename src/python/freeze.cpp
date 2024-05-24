@@ -515,7 +515,7 @@ struct FlatVariables {
 void assign(nb::handle dst, nb::handle src) {
     nb::handle src_tp = src.type();
     nb::handle dtp = dst.type();
-    raise_if(!src_tp.equal(dtp), "");
+    raise_if(!src_tp.equal(dtp), "Type missmatch!");
 
     if (is_drjit_type(src_tp)) {
         const ArraySupplement &s = supp(src_tp);
@@ -657,14 +657,18 @@ struct FunctionRecording {
 
         out_variables.traverse(output);
 
-        raise_if((out_variables.variables.size() > 0 &&
-                  in_variables.variables.size() > 0) &&
-                     out_variables.backend != backend,
-                 "freeze(): backend missmatch error (backend %u of "
-                 "output "
-                 "variables did not match backend %u of input "
-                 "variables)",
-                 (uint32_t)out_variables.backend, (uint32_t)backend);
+        if ((out_variables.variables.size() > 0 &&
+             in_variables.variables.size() > 0) &&
+            out_variables.backend != backend) {
+            Recording *recording = jit_record_stop(backend, nullptr, 0);
+            jit_record_destroy(recording);
+
+            nb::raise("freeze(): backend missmatch error (backend %u of "
+                      "output "
+                      "variables did not match backend %u of input "
+                      "variables)",
+                      (uint32_t)out_variables.backend, (uint32_t)backend);
+        }
 
         recording = jit_record_stop(backend, out_variables.variables.data(),
                                     out_variables.variables.size());
@@ -721,7 +725,7 @@ struct FrozenFunction {
     FrozenFunction(FrozenFunction &&) = default;
     FrozenFunction &operator=(FrozenFunction &&) = default;
 
-    uint32_t n_recordings(){
+    uint32_t n_recordings() {
         return this->recordings.size();
     }
 
@@ -757,7 +761,15 @@ struct FrozenFunction {
             // FunctionRecording recording;
             auto recording = std::make_unique<FunctionRecording>();
 
-            auto result = recording->record(func, input, in_variables);
+            nb::object result;
+            try {
+                result = recording->record(func, input, in_variables);
+            } catch (const std::exception &e) {
+                jit_record_abort(in_variables.backend);
+                
+                nb::chain_error(PyExc_RuntimeError, "%s", e.what());
+                nb::raise_python_error();
+            };
 
             in_variables.drop_variables();
 
@@ -798,6 +810,7 @@ void export_freeze(nb::module_ &m) {
                          nb::rv_policy::copy);
                  }
              })
-        .def_prop_ro("n_recordings", [](FrozenFunction &self){return self.n_recordings();})
+        .def_prop_ro("n_recordings",
+                     [](FrozenFunction &self) { return self.n_recordings(); })
         .def("__call__", &FrozenFunction::operator());
 }

@@ -951,9 +951,8 @@ def test24_multiple_kernels(t):
     y = dr.full(t, 0.5, n) + dr.opaque(t, 0.1)
     dr.eval(x, y)
 
-    with dr.scoped_set_flag(dr.JitFlag.KernelHistory):
-        ref_results = fn(x, y, flag=True)
-        dr.eval(ref_results)
+    ref_results = fn(x, y, flag=True)
+    dr.eval(ref_results)
 
     fn_frozen = dr.freeze(fn)
     for _ in range(2):
@@ -1324,7 +1323,7 @@ def test32_allocated_scratch_buffer(t):
         if dr.flag(dr.JitFlag.KernelFreezing):
             with pytest.raises(
                 RuntimeError,
-                match="created before starting recording, but was not speciefied as input!",
+                match="was created before recording was started, but it was not speciefied as and input variable",
             ):
                 result = model.fn1(x)
             break
