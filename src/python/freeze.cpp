@@ -95,6 +95,47 @@ struct Layout {
     }
 };
 
+inline nb::object get_hash_cb(nb::handle h) {
+    return nb::getattr(h, "__hash__");
+}
+
+inline size_t py_object_hash(nb::handle h) {
+    Py_hash_t hash = PyObject_Hash(h.ptr());
+    return (ssize_t)hash;
+}
+
+inline void hash_combine(size_t &seed, size_t value) {
+    /// From CityHash (https://github.com/google/cityhash)
+    const size_t mult = 0x9ddfea08eb382d69ull;
+    size_t a = (value ^ seed) * mult;
+    a ^= (a >> 47);
+    size_t b = (seed ^ a) * mult;
+    b ^= (b >> 47);
+    seed = b * mult;
+}
+
+struct LayoutHasher {
+    size_t operator()(const std::vector<Layout> &layouts) const {
+        size_t hash = layouts.size();
+        for (const Layout &layout : layouts) {
+            hash_combine(hash, py_object_hash(layout.type));
+            hash_combine(hash, layout.num);
+            hash_combine(hash, layout.fields.size());
+            for (auto &field : layout.fields) {
+                hash_combine(hash, py_object_hash(field));
+            }
+            hash_combine(hash, (size_t)layout.vt);
+            hash_combine(hash, (size_t)layout.vs);
+            hash_combine(hash, (size_t)layout.singleton_array);
+            hash_combine(hash, (size_t)layout.literal);
+            hash_combine(hash, (size_t)layout.index);
+            hash_combine(hash, py_object_hash(layout.py_object));
+        }
+
+        return hash;
+    }
+};
+
 nb::object init_from_index(nb::type_object type, uint32_t variable_index) {
     auto result = nb::inst_alloc_zero(type);
     const ArraySupplement &s = supp(result.type());
@@ -572,6 +613,18 @@ struct FunctionRecording {
 
     FunctionRecording() : out_variables(false) {
     }
+    FunctionRecording(const FunctionRecording &) = delete;
+    FunctionRecording &operator=(const FunctionRecording &) = delete;
+    FunctionRecording(FunctionRecording &&) = default;
+    FunctionRecording &operator=(FunctionRecording &&) = default;
+
+    ~FunctionRecording() {
+        if (this->recording) {
+            jit_record_destroy(this->recording);
+        }
+        this->recording = nullptr;
+    }
+
     /*
      * Record a function, given it's python input and flattened input.
      */
@@ -619,7 +672,7 @@ struct FunctionRecording {
         jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
                 out_variables.variables.size());
 
-        return result;
+        return output[0];
     }
     /*
      * Replays the recording.
@@ -647,22 +700,29 @@ struct FunctionRecording {
 
         return result;
     }
-    ~FunctionRecording() {
-        if (this->recording) {
-            jit_record_destroy(this->recording);
-        }
-    }
 };
 
+using RecordingMap =
+    tsl::robin_map<std::vector<Layout>, std::unique_ptr<FunctionRecording>,
+                   LayoutHasher>;
+
 struct FrozenFunction {
-    std::vector<Layout> in_layout;
     nb::callable func;
 
-    FunctionRecording recording;
+    RecordingMap recordings;
 
     FrozenFunction(nb::callable func) : func(func) {
     }
     ~FrozenFunction() {
+    }
+
+    FrozenFunction(const FrozenFunction &) = delete;
+    FrozenFunction &operator=(const FrozenFunction &) = delete;
+    FrozenFunction(FrozenFunction &&) = default;
+    FrozenFunction &operator=(FrozenFunction &&) = default;
+
+    uint32_t n_recordings(){
+        return this->recordings.size();
     }
 
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
@@ -685,25 +745,33 @@ struct FrozenFunction {
 
         raise_if(in_variables.backend == JitBackend::None,
                  "freeze(): Cannot infer backend without providing input "
-                 "variable to frozen functin!");
+                 "variable to frozen function!");
 
-        if (this->recording.recording == nullptr) {
+        auto it = this->recordings.find(in_variables.layout);
 
-            auto result = this->recording.record(func, input, in_variables);
+        if (it == this->recordings.end()) {
+            if (this->recordings.size() >= 1) {
+                jit_log(LogLevel::Info,
+                        "Function input missmatch! Function will be retraced.");
+            }
+            // FunctionRecording recording;
+            auto recording = std::make_unique<FunctionRecording>();
+
+            auto result = recording->record(func, input, in_variables);
 
             in_variables.drop_variables();
 
-            this->in_layout = std::move(in_variables.layout);
+            this->recordings.insert(
+                {std::move(in_variables.layout), std::move(recording)});
+
             return result;
         } else {
             // Drop references to variables
             in_variables.drop_variables();
 
-            // TODO: report missmatch
-            raise_if(this->in_layout != in_variables.layout,
-                     "freeze(): Layout mismatch!");
+            FunctionRecording *recording = it.value().get();
 
-            auto result = this->recording.replay(in_variables, input);
+            auto result = recording->replay(in_variables, input);
 
             return result;
         }
@@ -730,5 +798,6 @@ void export_freeze(nb::module_ &m) {
                          nb::rv_policy::copy);
                  }
              })
+        .def_prop_ro("n_recordings", [](FrozenFunction &self){return self.n_recordings();})
         .def("__call__", &FrozenFunction::operator());
 }
