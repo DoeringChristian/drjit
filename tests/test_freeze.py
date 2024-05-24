@@ -316,11 +316,12 @@ def test13_opaque(t):
     z = func(x, y)
     assert dr.all(t(1, 2, 3) == z)
 
-    with pytest.raises(RuntimeError):
-        x = t(1, 2, 3)
-        y = t(1, 2, 3)
-        z = func(x, y)
-        assert dr.all(t(2, 3, 4) == z)
+    x = t(1, 2, 3)
+    y = t(1, 2, 3)
+    z = func(x, y)
+    assert dr.all(t(2, 4, 6) == z)
+
+    assert func.n_recordings == 2
 
 
 @pytest.test_arrays("float32, jit, -is_diff, shape=(*)")
@@ -375,11 +376,12 @@ def test15_aliasing(t):
     z = func(x, y)
     assert dr.all(t(2, 4, 6) == z)
 
-    with pytest.raises(RuntimeError):
-        print("non-aliased:")
-        x = t(1, 2, 3)
-        y = t(2, 3, 4)
-        z = func(x, y)
+    print("non-aliased:")
+    x = t(1, 2, 3)
+    y = t(2, 3, 4)
+    z = func(x, y)
+    assert dr.all(t(3, 5, 7) == z)
+    assert func.n_recordings == 2
 
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
@@ -992,9 +994,11 @@ def test27_global_flag(t):
     result1 = my_fn(one, one, c=0.1)
     assert dr.allclose(result1, 2.1)
 
-    # Can't change the type of an input
-    with pytest.raises(RuntimeError):
-        _ = my_fn(one, one, c=Float(0.6))
+    # Can change the type of an input
+    result2 = my_fn(one, one, c=Float(0.6))
+    assert dr.allclose(result2, 2.6)
+
+    assert my_fn.n_recordings == 2
 
     # Disable frozen kernels globally, now the freezing
     # logic should be completely bypassed
