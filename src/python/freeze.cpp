@@ -36,6 +36,7 @@ struct Layout {
     /// Weather the variable is an array with a single entry.
     /// Such arrays are handled differently by the compiler.
     bool singleton_array = false;
+    bool unaligned = false;
     /// The literal data
     uint64_t literal = 0;
     /// The index in the flat_variables array of this variable.
@@ -77,6 +78,10 @@ struct Layout {
         }
         if (this->singleton_array != rhs.singleton_array) {
             jit_log(LogLevel::Warn, "    singleton_array");
+            return false;
+        }
+        if (this->unaligned != rhs.unaligned) {
+            jit_log(LogLevel::Warn, "    unaligned");
             return false;
         }
         if (this->index != rhs.index) {
@@ -127,6 +132,7 @@ struct LayoutHasher {
             hash_combine(hash, (size_t)layout.vt);
             hash_combine(hash, (size_t)layout.vs);
             hash_combine(hash, (size_t)layout.singleton_array);
+            hash_combine(hash, (size_t)layout.unaligned);
             hash_combine(hash, (size_t)layout.literal);
             hash_combine(hash, (size_t)layout.index);
             hash_combine(hash, py_object_hash(layout.py_object));
@@ -262,6 +268,7 @@ struct FlatVariables {
             jit_log(LogLevel::Info, "    vs=%u", (uint32_t)vs);
             layout.index = this->add_variable(index);
             layout.singleton_array = jit_var_size(index) == 1;
+            layout.unaligned = jit_var_is_unaligned(index);
         } else {
             nb::raise("collect(): found variable %zu in unsupported state %u!",
                       index, (uint32_t)vs);
@@ -765,8 +772,9 @@ struct FrozenFunction {
             try {
                 result = recording->record(func, input, in_variables);
             } catch (const std::exception &e) {
+                in_variables.drop_variables();
                 jit_record_abort(in_variables.backend);
-                
+
                 nb::chain_error(PyExc_RuntimeError, "%s", e.what());
                 nb::raise_python_error();
             };
@@ -791,8 +799,7 @@ struct FrozenFunction {
 };
 
 FrozenFunction freeze(nb::callable func) {
-    FrozenFunction frozen(func);
-    return frozen;
+    return FrozenFunction(func);
 }
 
 void export_freeze(nb::module_ &m) {
