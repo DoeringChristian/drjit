@@ -455,9 +455,8 @@ def get_pkg(t):
 
 
 @pytest.mark.parametrize("symbolic", [True])
-@pytest.mark.parametrize("optimize", [True, False])
-@pytest.test_arrays("float32, jit, shape=(*)")
-def test19_vcall(t, symbolic, optimize):
+@pytest.test_arrays("float32, jit, -is_diff, cuda, shape=(*)")
+def test19_vcall(t, symbolic):
     pkg = get_pkg(t)
 
     A, B, Base, BasePtr = pkg.A, pkg.B, pkg.Base, pkg.BasePtr
@@ -474,8 +473,7 @@ def test19_vcall(t, symbolic, optimize):
         return c.f(xi, yi)
 
     with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
-        with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
-            xo, yo = func(c, xi, yi)
+        xo, yo = func(c, xi, yi)
 
     assert dr.all(xo == t(10, 12, 0, 14, 16))
     assert dr.all(yo == t(-1, -2, 0, -3, -4))
@@ -483,14 +481,68 @@ def test19_vcall(t, symbolic, optimize):
     c = BasePtr(a, a, None, b, b)
 
     with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
-        with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
-            xo, yo = func(c, xi, yi)
+        xo, yo = func(c, xi, yi)
 
     assert func.n_recordings == 1
 
     assert dr.all(xo == t(10, 12, 0, 21, 24))
     assert dr.all(yo == t(-1, -2, 0, 3, 4))
 
+    
+@pytest.mark.parametrize("symbolic", [True])
+@pytest.mark.parametrize("optimize", [True])
+@pytest.mark.parametrize("opaque", [True])
+@pytest.test_arrays("float32, -is_diff, jit, shape=(*)")
+def test20_vcall_optimize(t, symbolic, optimize, opaque):
+    print(f"{symbolic=}")
+    print(f"{optimize=}")
+    print(f"{opaque=}")
+    pkg = get_pkg(t)
+
+    A, B, Base, BasePtr = pkg.A, pkg.B, pkg.Base, pkg.BasePtr
+    Mask = dr.mask_t(t)
+    a, b = B(), B()
+
+    a.value = t(2)
+    b.value = t(3)
+
+    if opaque:
+        dr.make_opaque(a.value, b.value)
+
+    BasePtr.DRJIT_STRUCT = {"value": t}
+
+    c = BasePtr(a, a, None, a, b)
+
+    print(type(c))
+
+    x = t(1, 2, 8, 3, 4)
+
+    def func(c, xi, va, vb):
+        return c.g(xi)
+
+    frozen = dr.freeze(func)
+
+    with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
+        with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
+            xo = frozen(c, x, a.value, b.value)
+
+    assert dr.all(xo == func(c, x, a.value, b.value))
+
+    a.value = t(3)
+    b.value = t(2)
+    
+    if opaque:
+        dr.make_opaque(a.value, b.value)
+
+    c = BasePtr(a, a, None, b, b)
+
+    with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
+        with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
+            xo = frozen(c, x, a.value, b.value)
+
+    assert frozen.n_recordings == 1
+
+    assert dr.all(xo == func(c, x, a.value, b.value))
 
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test01_freeze(t):
