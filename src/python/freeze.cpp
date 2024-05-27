@@ -8,6 +8,7 @@
 #include "drjit/extra.h"
 #include "eval.h"
 #include "listobject.h"
+#include "nanobind/nanobind.h"
 #include "object.h"
 #include "pyerrors.h"
 #include "tupleobject.h"
@@ -97,48 +98,6 @@ struct Layout {
             return false;
         }
         return true;
-    }
-};
-
-inline nb::object get_hash_cb(nb::handle h) {
-    return nb::getattr(h, "__hash__");
-}
-
-inline size_t py_object_hash(nb::handle h) {
-    Py_hash_t hash = PyObject_Hash(h.ptr());
-    return (ssize_t)hash;
-}
-
-inline void hash_combine(size_t &seed, size_t value) {
-    /// From CityHash (https://github.com/google/cityhash)
-    const size_t mult = 0x9ddfea08eb382d69ull;
-    size_t a = (value ^ seed) * mult;
-    a ^= (a >> 47);
-    size_t b = (seed ^ a) * mult;
-    b ^= (b >> 47);
-    seed = b * mult;
-}
-
-struct LayoutHasher {
-    size_t operator()(const std::vector<Layout> &layouts) const {
-        size_t hash = layouts.size();
-        for (const Layout &layout : layouts) {
-            hash_combine(hash, py_object_hash(layout.type));
-            hash_combine(hash, layout.num);
-            hash_combine(hash, layout.fields.size());
-            for (auto &field : layout.fields) {
-                hash_combine(hash, py_object_hash(field));
-            }
-            hash_combine(hash, (size_t)layout.vt);
-            hash_combine(hash, (size_t)layout.vs);
-            hash_combine(hash, (size_t)layout.singleton_array);
-            hash_combine(hash, (size_t)layout.unaligned);
-            hash_combine(hash, (size_t)layout.literal);
-            hash_combine(hash, (size_t)layout.index);
-            hash_combine(hash, py_object_hash(layout.py_object));
-        }
-
-        return hash;
     }
 };
 
@@ -713,9 +672,61 @@ struct FunctionRecording {
     }
 };
 
+inline size_t py_object_hash(nb::handle h) {
+    Py_hash_t hash = PyObject_Hash(h.ptr());
+    if (hash == -1 && PyErr_Occurred())
+        nb::raise_python_error();
+    return (ssize_t)hash;
+}
+
+inline void hash_combine(size_t &seed, size_t value) {
+    /// From CityHash (https://github.com/google/cityhash)
+    const size_t mult = 0x9ddfea08eb382d69ull;
+    size_t a = (value ^ seed) * mult;
+    a ^= (a >> 47);
+    size_t b = (seed ^ a) * mult;
+    b ^= (b >> 47);
+    seed = b * mult;
+}
+
+struct RecordingKey {
+    std::vector<Layout> layout;
+    JitFlag flags;
+
+    bool operator==(const RecordingKey &rhs) const {
+        return this->layout == rhs.layout && this->flags == rhs.flags;
+    }
+};
+
+struct RecordingKeyHasher {
+    size_t operator()(const RecordingKey &key) const {
+        // Hash the layout
+        size_t hash = key.layout.size();
+        for (const Layout &layout : key.layout) {
+            hash_combine(hash, py_object_hash(layout.type));
+            hash_combine(hash, layout.num);
+            hash_combine(hash, layout.fields.size());
+            for (auto &field : layout.fields) {
+                hash_combine(hash, py_object_hash(field));
+            }
+            hash_combine(hash, (size_t)layout.vt);
+            hash_combine(hash, (size_t)layout.vs);
+            hash_combine(hash, (size_t)layout.singleton_array);
+            hash_combine(hash, (size_t)layout.unaligned);
+            hash_combine(hash, (size_t)layout.literal);
+            hash_combine(hash, (size_t)layout.index);
+            hash_combine(hash, py_object_hash(layout.py_object));
+        }
+
+        hash_combine(hash, (size_t)key.flags);
+
+        return hash;
+    }
+};
+
 using RecordingMap =
-    tsl::robin_map<std::vector<Layout>, std::unique_ptr<FunctionRecording>,
-                   LayoutHasher>;
+    tsl::robin_map<RecordingKey, std::unique_ptr<FunctionRecording>,
+                   RecordingKeyHasher>;
 
 struct FrozenFunction {
     nb::callable func;
@@ -758,7 +769,8 @@ struct FrozenFunction {
                  "freeze(): Cannot infer backend without providing input "
                  "variable to frozen function!");
 
-        auto it = this->recordings.find(in_variables.layout);
+        auto key = RecordingKey{/*layout=*/in_variables.layout};
+        auto it = this->recordings.find(key);
 
         if (it == this->recordings.end()) {
             if (this->recordings.size() >= 1) {
@@ -781,8 +793,7 @@ struct FrozenFunction {
 
             in_variables.drop_variables();
 
-            this->recordings.insert(
-                {std::move(in_variables.layout), std::move(recording)});
+            this->recordings.insert({std::move(key), std::move(recording)});
 
             return result;
         } else {

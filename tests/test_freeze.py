@@ -455,8 +455,9 @@ def get_pkg(t):
 
 
 @pytest.mark.parametrize("symbolic", [True])
+@pytest.mark.parametrize("optimize", [True, False])
 @pytest.test_arrays("float32, jit, shape=(*)")
-def test19_vcall(t, symbolic):
+def test19_vcall(t, symbolic, optimize):
     pkg = get_pkg(t)
 
     A, B, Base, BasePtr = pkg.A, pkg.B, pkg.Base, pkg.BasePtr
@@ -473,7 +474,8 @@ def test19_vcall(t, symbolic):
         return c.f(xi, yi)
 
     with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
-        xo, yo = func(c, xi, yi)
+        with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
+            xo, yo = func(c, xi, yi)
 
     assert dr.all(xo == t(10, 12, 0, 14, 16))
     assert dr.all(yo == t(-1, -2, 0, -3, -4))
@@ -481,7 +483,10 @@ def test19_vcall(t, symbolic):
     c = BasePtr(a, a, None, b, b)
 
     with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
-        xo, yo = func(c, xi, yi)
+        with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
+            xo, yo = func(c, xi, yi)
+
+    assert func.n_recordings == 1
 
     assert dr.all(xo == t(10, 12, 0, 21, 24))
     assert dr.all(yo == t(-1, -2, 0, 3, 4))
