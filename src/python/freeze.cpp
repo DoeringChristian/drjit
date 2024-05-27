@@ -188,13 +188,16 @@ struct FlatVariables {
                       "variable %u does not match backend of others %u)!",
                       (uint32_t)var_backend, (uint32_t)this->backend);
         }
-        raise_if(s.index == nullptr, "ArraySupplement index function "
+        raise_if(s.index == nullptr, "freeze(): ArraySupplement index function "
                                      "pointer is nullptr.");
+        // raise_if(s.is_class,
+        //          "freeze(): Class variables are not yet supported!");
 
         uint64_t index = s.index(inst_ptr(h));
 
-        jit_log(LogLevel::Info, "collect(): collecting var(%u, backend=%u)",
-                index, var_backend);
+        jit_log(LogLevel::Info,
+                "collect(): collecting var(%u, backend=%u, type=%u)", index,
+                var_backend, jit_var_type(index));
 
         if (jit_var_type(index) == VarType::Pointer) {
             // In order to support pointer inputs,
@@ -224,7 +227,7 @@ struct FlatVariables {
             // we have stablished that the variable is a literal.
             jit_var_read(index, 0, &layout.literal);
         } else if (vs == VarState::Evaluated) {
-            jit_log(LogLevel::Info, "    vs=%u", (uint32_t)vs);
+            jit_log(LogLevel::Info, "    vs=%s", jit_var_kind_name(index));
             layout.index = this->add_variable(index);
             layout.singleton_array = jit_var_size(index) == 1;
             layout.unaligned = jit_var_is_unaligned(index);
@@ -255,6 +258,8 @@ struct FlatVariables {
      */
     void traverse(nb::handle h) {
         nb::handle tp = h.type();
+
+        // nb::print(tp);
 
         try {
             if (is_drjit_type(tp)) {
@@ -691,7 +696,7 @@ inline void hash_combine(size_t &seed, size_t value) {
 
 struct RecordingKey {
     std::vector<Layout> layout;
-    JitFlag flags;
+    uint32_t flags;
 
     bool operator==(const RecordingKey &rhs) const {
         return this->layout == rhs.layout && this->flags == rhs.flags;
@@ -769,7 +774,9 @@ struct FrozenFunction {
                  "freeze(): Cannot infer backend without providing input "
                  "variable to frozen function!");
 
-        auto key = RecordingKey{/*layout=*/in_variables.layout};
+        uint32_t flags = jit_flags();
+        auto key =
+            RecordingKey{/*layout=*/in_variables.layout, /*flags=*/flags};
         auto it = this->recordings.find(key);
 
         if (it == this->recordings.end()) {
