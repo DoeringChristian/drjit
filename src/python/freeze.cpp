@@ -1,7 +1,4 @@
-
 #include "freeze.h"
-#include "apply.h"
-#include "autodiff.h"
 #include "base.h"
 #include "common.h"
 #include "drjit-core/jit.h"
@@ -55,7 +52,8 @@ struct Layout {
             return false;
         }
         if (this->num != rhs.num) {
-            jit_log(LogLevel::Warn, "    num");
+            jit_log(LogLevel::Warn, "    num: %u != %u", this->num,
+                    rhs.num);
             return false;
         }
         if (this->fields.size() != rhs.fields.size()) {
@@ -176,10 +174,11 @@ struct FlatVariables {
         }
     }
 
-    void add_flat_dr_var(nb::handle h) {
-        auto s = supp(h.type());
-
-        JitBackend var_backend = (JitBackend)s.backend;
+    /**
+     * Add flat drjit variable by index.
+     */
+    void add_flat_dr_var_index(uint32_t index, nb::handle tp = nb::none()) {
+        JitBackend var_backend = (JitBackend)jit_var_backend(index);
 
         if (this->backend == var_backend || this->backend == JitBackend::None) {
             this->backend = var_backend;
@@ -188,12 +187,6 @@ struct FlatVariables {
                       "variable %u does not match backend of others %u)!",
                       (uint32_t)var_backend, (uint32_t)this->backend);
         }
-        raise_if(s.index == nullptr, "freeze(): ArraySupplement index function "
-                                     "pointer is nullptr.");
-        // raise_if(s.is_class,
-        //          "freeze(): Class variables are not yet supported!");
-
-        uint64_t index = s.index(inst_ptr(h));
 
         jit_log(LogLevel::Info,
                 "collect(): collecting var(%u, backend=%u, type=%u)", index,
@@ -213,7 +206,7 @@ struct FlatVariables {
 
         Layout layout;
         VarState vs = jit_var_state(index);
-        layout.type = nb::borrow<nb::type_object>(h.type());
+        layout.type = nb::borrow<nb::type_object>(tp);
         layout.vs = vs;
         layout.vt = jit_var_type(index);
 
@@ -232,10 +225,26 @@ struct FlatVariables {
             layout.singleton_array = jit_var_size(index) == 1;
             layout.unaligned = jit_var_is_unaligned(index);
         } else {
-            nb::raise("collect(): found variable %zu in unsupported state %u!",
-                      index, (uint32_t)vs);
+
+            jit_log(LogLevel::Error,
+                    "collect(): found variable %u in unsupported state %u!",
+                    index, (uint32_t)vs);
+            nb::raise("");
         }
         this->layout.push_back(layout);
+    }
+
+    void add_flat_dr_var(nb::handle h) {
+        auto s = supp(h.type());
+
+        raise_if(s.index == nullptr, "freeze(): ArraySupplement index function "
+                                     "pointer is nullptr.");
+        // raise_if(s.is_class,
+        //          "freeze(): Class variables are not yet supported!");
+
+        uint64_t index = s.index(inst_ptr(h));
+
+        this->add_flat_dr_var_index(index, h.type());
     }
 
     void add_dr_var(nb::handle h) {
@@ -258,8 +267,6 @@ struct FlatVariables {
      */
     void traverse(nb::handle h) {
         nb::handle tp = h.type();
-
-        // nb::print(tp);
 
         try {
             if (is_drjit_type(tp)) {
@@ -349,7 +356,20 @@ struct FlatVariables {
                     traverse(nb::getattr(h, k));
                 }
             } else if (nb::object cb = get_traverse_cb_ro(tp); cb.is_valid()) {
-                // TODO: traverse callback
+                Layout layout;
+                layout.type = nb::borrow<nb::type_object>(tp);
+                size_t layout_index = this->layout.size();
+                this->layout.push_back(layout);
+
+                uint32_t num_fileds = 0;
+
+                cb(h, nb::cpp_function([&](uint64_t index) {
+                       num_fileds++;
+                       this->add_flat_dr_var_index(index, nb::none());
+                   }));
+
+                // Update layout number of fields
+                this->layout[layout_index].num = num_fileds;
             } else if (tp.is(&_PyNone_Type)) {
                 Layout layout;
                 layout.type = nb::borrow<nb::type_object>(tp);
@@ -379,6 +399,19 @@ struct FlatVariables {
                             "of type '%U': %s",
                             nb::type_name(tp).ptr(), e.what());
             nb::raise_python_error();
+        }
+    }
+
+    uint64_t construct_dr_var_index(Layout &layout) {
+        if (layout.vs == VarState::Literal) {
+            uint32_t index =
+                jit_var_literal(this->backend, layout.vt, &layout.literal);
+
+            return index;
+        } else {
+            uint32_t index = this->variables[layout.index];
+
+            return index;
         }
     }
 
@@ -470,6 +503,17 @@ struct FlatVariables {
                 dict[k] = construct();
             }
             return layout.type(**dict);
+        } else if (nb::object cb = get_traverse_cb_rw(layout.type);
+                   cb.is_valid()) {
+            nb::object result = nb::inst_alloc_zero(layout.type);
+
+            cb(result, nb::cpp_function([&](uint64_t) {
+                   Layout &layout = this->layout[layout_index++];
+                   return construct_dr_var_index(layout);
+               }));
+
+            return result;
+
         } else {
             return layout.py_object;
         }
@@ -535,47 +579,119 @@ void assign(nb::handle dst, nb::handle src) {
                 nb::object k = field.attr(DR_STR(name));
                 assign(nb::getattr(dst, k), nb::getattr(src, k));
             }
+        } else if (nb::object src_cb = get_traverse_cb_ro(src_tp),
+                   dst_cb = get_traverse_cb_rw(dtp);
+                   src_cb.is_valid() && dst_cb.is_valid()) {
+            std::vector<uint64_t> tmp;
+            src_cb(src, nb::cpp_function(
+                            [&](uint64_t index) { tmp.push_back(index); }));
+            size_t i = 0;
+            dst_cb(dst, nb::cpp_function([&](uint64_t) { return tmp[i++]; }));
         } else {
         }
     }
 }
 
-bool schedule_force_undefined(nb::handle h) {
-    bool result_ = false;
+struct TransformInPlaceCallback {
+    // The transform operation, applied to each index.
+    // Should return an owning reference.
+    virtual uint64_t operator()(uint64_t index) {
+        return index;
+    };
+};
 
-    struct ScheduleCallback : TraverseCallback {
-        bool &result;
-        ScheduleCallback(bool &result) : result(result) {
-        }
+static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
+    nb::handle tp = h.type();
 
-        void operator()(nb::handle h) override {
-            const ArraySupplement &s = supp(h.type());
-            if (s.index) {
-                uint64_t index = s.index(inst_ptr(h));
+    if (is_drjit_type(tp)) {
+        const ArraySupplement &s = supp(tp);
+        if (s.is_tensor) {
+            uint64_t index = s.index(inst_ptr(h));
+            uint64_t new_index = op(index);
+            s.reset_index(new_index, inst_ptr(h));
+            ad_var_dec_ref(new_index);
+        } else if (s.ndim > 1) {
+            Py_ssize_t len = s.shape[0];
+            if (len == DRJIT_DYNAMIC)
+                len = s.len(inst_ptr(h));
 
-                VarState vs = jit_var_state(index);
-                // Only `schdule_force` undefined and literal variables with
-                // size > 1
-                if (vs == VarState::Undefined || (vs == VarState::Literal)) {
-                    // if (vs == VarState::Undefined ||
-                    //     (vs == VarState::Literal && jit_var_size(index) > 1))
-                    //     {
-                    int rv;
-                    index = ad_var_schedule_force(index, &rv);
-
-                    if (rv)
-                        result = true;
-
-                    s.reset_index(index, inst_ptr(h));
-                    ad_var_dec_ref(index);
-                }
+            for (Py_ssize_t i = 0; i < len; ++i) {
+                transform_in_place(h[i], op);
             }
+        } else {
+            uint64_t index = s.index(inst_ptr(h));
+            uint64_t new_index = op(index);
+            s.reset_index(new_index, inst_ptr(h));
+            ad_var_dec_ref(new_index);
+        }
+    } else if (tp.is(&PyTuple_Type)) {
+        nb::tuple tuple = nb::borrow<nb::tuple>(h);
+        for (uint32_t i = 0; i < tuple.size(); ++i) {
+            transform_in_place(tuple[i], op);
+        }
+    } else if (tp.is(&PyList_Type)) {
+        nb::list list = nb::borrow<nb::list>(h);
+        for (uint32_t i = 0; i < list.size(); ++i) {
+            transform_in_place(list[i], op);
+        }
+    } else if (tp.is(&PyDict_Type)) {
+        nb::dict dict = nb::borrow<nb::dict>(h);
+        for (auto v : dict.values()) {
+            transform_in_place(v, op);
+        }
+    } else {
+        if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()) {
+            for (auto [k, v] : ds) {
+                transform_in_place(v, op);
+            }
+        } else if (nb::object df = get_dataclass_fields(tp)) {
+            for (nb::handle field : df) {
+                nb::object k = field.attr(DR_STR(name));
+                transform_in_place(nb::getattr(h, k), op);
+            }
+        } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
+            // We want to transfer ownership, so we have to drop references
+            // afterwards.
+            // This is accomplished by storing them.
+            std::vector<uint64_t> tmp;
+            cb(h, nb::cpp_function([&](uint64_t index) {
+                   uint64_t new_index = op(index);
+                   tmp.push_back(new_index);
+                   return new_index;
+               }));
+            for (uint64_t index : tmp) {
+                ad_var_dec_ref(index);
+            }
+        } else {
+        }
+    }
+}
+
+static void make_opaque(nb::handle h) {
+    jit_log(LogLevel::Debug, "make_opaque");
+
+    struct ScheduleForceCallback : TransformInPlaceCallback {
+        bool result = false;
+
+        uint64_t operator()(uint64_t index) override {
+            int rv = 0;
+            uint64_t new_index = ad_var_schedule_force(index, &rv);
+            jit_log(LogLevel::Debug, "    scheduled %zu -> %zu", index,
+                    new_index);
+            if (rv)
+                result = true;
+
+            return new_index;
         }
     };
 
-    ScheduleCallback sc{result_};
-    traverse("drjit.schedule", sc, h);
-    return result_;
+    ScheduleForceCallback op;
+    transform_in_place(h, op);
+
+    if (op.result) {
+        nb::gil_scoped_release guard;
+        jit_eval();
+    }
 }
 
 struct FunctionRecording {
@@ -618,6 +734,8 @@ struct FunctionRecording {
         output.append(result);
         output.append(input);
 
+        // NOTE: might want to make result opaque as well?
+        make_opaque(input);
         eval(output);
 
         jit_log(LogLevel::Info, "Traversing output");
@@ -701,6 +819,27 @@ struct RecordingKey {
     bool operator==(const RecordingKey &rhs) const {
         return this->layout == rhs.layout && this->flags == rhs.flags;
     }
+
+    void log(){
+        jit_log(LogLevel::Debug, "RecordingKey{");
+        jit_log(LogLevel::Debug, "    flags = %u", this->flags);
+
+        jit_log(LogLevel::Debug, "    layout = [");
+        for (Layout &layout: layout){
+            jit_log(LogLevel::Debug, "        Layout{");
+            if (!layout.type.is_none())
+                jit_log(LogLevel::Debug, "            type = %s,", nb::type_name(layout.type).c_str());
+            jit_log(LogLevel::Debug, "            num = %u,", layout.num);
+            jit_log(LogLevel::Debug, "            vt = %u,", (uint32_t)layout.vt);
+            jit_log(LogLevel::Debug, "            vs = %u,", (uint32_t)layout.vs);
+            jit_log(LogLevel::Debug, "            singleton_array = %u,", layout.singleton_array);
+            jit_log(LogLevel::Debug, "        },");
+        }
+        jit_log(LogLevel::Debug, "    ]");
+        
+        jit_log(LogLevel::Debug, "}");
+
+    }
 };
 
 struct RecordingKeyHasher {
@@ -763,10 +902,12 @@ struct FrozenFunction {
         input.append(kwargs);
 
         // Evaluate input variables, forcing evaluation of undefined variables
-        schedule_force_undefined(input);
+        // NOTE: not sure, why both are necessary
+        make_opaque(input);
         eval(input);
 
         // Traverse input variables
+        jit_log(LogLevel::Debug, "freeze(): Traversing input.");
         FlatVariables in_variables(true);
         in_variables.traverse(input);
 
@@ -832,7 +973,7 @@ void export_freeze(nb::module_ &m) {
                          [self, instance](nb::args args, nb::kwargs kwargs) {
                              return self(instance, *args, **kwargs);
                          },
-                         nb::rv_policy::copy);
+                         nb::rv_policy::move);
                  }
              })
         .def_prop_ro("n_recordings",
