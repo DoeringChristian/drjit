@@ -5,6 +5,7 @@
 #include "drjit/extra.h"
 #include "eval.h"
 #include "listobject.h"
+#include "nanobind/intrusive/counter.h"
 #include "nanobind/nanobind.h"
 #include "object.h"
 #include "pyerrors.h"
@@ -52,8 +53,7 @@ struct Layout {
             return false;
         }
         if (this->num != rhs.num) {
-            jit_log(LogLevel::Warn, "    num: %u != %u", this->num,
-                    rhs.num);
+            jit_log(LogLevel::Warn, "    num: %u != %u", this->num, rhs.num);
             return false;
         }
         if (this->fields.size() != rhs.fields.size()) {
@@ -247,10 +247,51 @@ struct FlatVariables {
         this->add_flat_dr_var_index(index, h.type());
     }
 
+    /**
+     * Traverse a variable and it's derived variables.
+     */
+    void add_dr_class_var(nb::handle h) {
+        const ArraySupplement &s = supp(h.type());
+
+        jit_log(LogLevel::Debug,
+                "traverse(): Found class variable on backen %u", backend);
+
+        // Add the base type (hopefully)
+        size_t layout_index = this->layout.size();
+        add_flat_dr_var(h);
+
+        JitBackend backend = (JitBackend)s.backend;
+        nb::str domain = nb::borrow<nb::str>(nb::getattr(h.type(), "Domain"));
+
+        uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
+
+        this->layout[layout_index].num = id_bound;
+
+        jit_log(LogLevel::Debug,
+                "traverse(): Traversing %u instances of domain \"%s\".",
+                id_bound, domain.c_str());
+        for (uint32_t id = 0; id < id_bound; ++id) {
+            void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
+
+            // WARN: very unsafe cast!
+            nb::intrusive_base *base = (nb::intrusive_base *)ptr;
+            nb::handle inst_obj = base->self_py();
+
+            traverse(inst_obj);
+        }
+    }
+
     void add_dr_var(nb::handle h) {
         nb::handle tp = h.type();
 
-        add_flat_dr_var(h);
+        auto s = supp(h.type());
+
+        // Handle class var
+        if (s.is_class) {
+            add_dr_class_var(h);
+        } else {
+            add_flat_dr_var(h);
+        }
     }
 
     /**
@@ -415,7 +456,7 @@ struct FlatVariables {
         }
     }
 
-    nb::object construct_dr_var(Layout &layout) {
+    nb::object construct_flat_dr_var(Layout &layout) {
         if (layout.vs == VarState::Literal) {
             uint32_t index =
                 jit_var_literal(this->backend, layout.vt, &layout.literal);
@@ -435,6 +476,45 @@ struct FlatVariables {
             const ArraySupplement &s = supp(result.type());
             s.init_index(index, inst_ptr(result));
             return result;
+        }
+    }
+
+    nb::object construct_dr_class_var(Layout &layout) {
+        const ArraySupplement &s = supp(layout.type);
+
+        JitBackend backend = (JitBackend)s.backend;
+        nb::str domain =
+            nb::borrow<nb::str>(nb::getattr(layout.type, "Domain"));
+
+        uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
+        if (id_bound != layout.num) {
+            jit_fail("Number of sub-types registered with backend changed "
+                     "during recording!");
+        }
+
+        nb::object result = construct_flat_dr_var(layout);
+
+        for (uint32_t id = 0; id < id_bound; ++id) {
+            void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
+
+            // WARN: very unsafe cast!
+            nb::intrusive_base *base = (nb::intrusive_base *)ptr;
+            nb::handle inst_obj = base->self_py();
+
+            // TODO: what should we acctually do in this case?
+            construct();
+        }
+
+        return result;
+    }
+
+    nb::object construct_dr_var(Layout &layout) {
+        const ArraySupplement &s = supp(layout.type);
+
+        if (s.is_class) {
+            return construct_dr_class_var(layout);
+        } else {
+            return construct_flat_dr_var(layout);
         }
     }
 
@@ -816,29 +896,89 @@ struct RecordingKey {
     std::vector<Layout> layout;
     uint32_t flags;
 
+    RecordingKey(){}
+    RecordingKey(std::vector<Layout> layout, uint32_t flags)
+        : layout(std::move(layout)), flags(flags) {
+    }
+
     bool operator==(const RecordingKey &rhs) const {
         return this->layout == rhs.layout && this->flags == rhs.flags;
     }
 
-    void log(){
+    void log_diff(const RecordingKey *rhs) const {
+        jit_log(LogLevel::Debug, "Key difference:");
+        if (this->flags != rhs->flags)
+            jit_log(LogLevel::Debug, "    flags: %u != %u", this->flags,
+                    rhs->flags);
+
+        if (this->layout.size() != rhs->layout.size()) {
+            jit_log(LogLevel::Debug, "    n_layout: %u != %u",
+                    this->layout.size(), rhs->layout.size());
+            return;
+        }
+
+        for (uint32_t i = 0; i < this->layout.size(); ++i) {
+            const Layout &lhs_layout = this->layout[i];
+            const Layout &rhs_layout = rhs->layout[i];
+
+            // if (lhs_layout == rhs_layout)
+            //     continue;
+
+            jit_log(LogLevel::Debug, "    layout %u:", i);
+            if (!lhs_layout.type.is_none() && !rhs_layout.type.is_none() &&
+                !lhs_layout.type.equal(rhs_layout.type))
+                jit_log(LogLevel::Debug, "    type: %s != %s",
+                        nb::type_name(lhs_layout.type).c_str(),
+                        nb::type_name(rhs_layout.type).c_str());
+            if (lhs_layout.num != rhs_layout.num)
+                jit_log(LogLevel::Debug, "    num: %u != %u", lhs_layout.num,
+                        rhs_layout.num);
+            if (lhs_layout.vt != rhs_layout.vt)
+                jit_log(LogLevel::Debug, "    vt: %u != %u", lhs_layout.vt,
+                        rhs_layout.vt);
+            if (lhs_layout.vs != rhs_layout.vs)
+                jit_log(LogLevel::Debug, "    vs: %u != %u", lhs_layout.vs,
+                        rhs_layout.vs);
+            if (lhs_layout.singleton_array != rhs_layout.singleton_array)
+                jit_log(LogLevel::Debug, "    singleton_array: %u != %u",
+                        lhs_layout.singleton_array, rhs_layout.singleton_array);
+            if (lhs_layout.unaligned != rhs_layout.unaligned)
+                jit_log(LogLevel::Debug, "    unaligned: %u != %u",
+                        lhs_layout.unaligned, rhs_layout.unaligned);
+            if (lhs_layout.literal != rhs_layout.literal)
+                jit_log(LogLevel::Debug, "    literal: %u != %u",
+                        lhs_layout.literal, rhs_layout.literal);
+            if (lhs_layout.index != rhs_layout.index)
+                jit_log(LogLevel::Debug, "    index: %u != %u",
+                        lhs_layout.index, rhs_layout.index);
+            if (!(lhs_layout.py_object.equal(rhs_layout.py_object)))
+                jit_log(LogLevel::Debug, "    py_object: %s != %s",
+                        nb::str(lhs_layout.py_object).c_str(),
+                        nb::str(rhs_layout.py_object).c_str());
+        }
+    }
+    void log() {
         jit_log(LogLevel::Debug, "RecordingKey{");
         jit_log(LogLevel::Debug, "    flags = %u", this->flags);
 
         jit_log(LogLevel::Debug, "    layout = [");
-        for (Layout &layout: layout){
+        for (Layout &layout : layout) {
             jit_log(LogLevel::Debug, "        Layout{");
             if (!layout.type.is_none())
-                jit_log(LogLevel::Debug, "            type = %s,", nb::type_name(layout.type).c_str());
+                jit_log(LogLevel::Debug, "            type = %s,",
+                        nb::type_name(layout.type).c_str());
             jit_log(LogLevel::Debug, "            num = %u,", layout.num);
-            jit_log(LogLevel::Debug, "            vt = %u,", (uint32_t)layout.vt);
-            jit_log(LogLevel::Debug, "            vs = %u,", (uint32_t)layout.vs);
-            jit_log(LogLevel::Debug, "            singleton_array = %u,", layout.singleton_array);
+            jit_log(LogLevel::Debug, "            vt = %u,",
+                    (uint32_t)layout.vt);
+            jit_log(LogLevel::Debug, "            vs = %u,",
+                    (uint32_t)layout.vs);
+            jit_log(LogLevel::Debug, "            singleton_array = %u,",
+                    layout.singleton_array);
             jit_log(LogLevel::Debug, "        },");
         }
         jit_log(LogLevel::Debug, "    ]");
-        
-        jit_log(LogLevel::Debug, "}");
 
+        jit_log(LogLevel::Debug, "}");
     }
 };
 
@@ -869,13 +1009,14 @@ struct RecordingKeyHasher {
 };
 
 using RecordingMap =
-    tsl::robin_map<RecordingKey, std::unique_ptr<FunctionRecording>,
-                   RecordingKeyHasher>;
+    tsl::robin_map<RecordingKey,
+                   std::unique_ptr<FunctionRecording>, RecordingKeyHasher>;
 
 struct FrozenFunction {
     nb::callable func;
 
     RecordingMap recordings;
+    RecordingKey prev_key;
 
     FrozenFunction(nb::callable func) : func(func) {
     }
@@ -916,14 +1057,15 @@ struct FrozenFunction {
                  "variable to frozen function!");
 
         uint32_t flags = jit_flags();
-        auto key =
-            RecordingKey{/*layout=*/in_variables.layout, /*flags=*/flags};
+        auto key = RecordingKey(
+            std::move(in_variables.layout), flags);
         auto it = this->recordings.find(key);
 
         if (it == this->recordings.end()) {
             if (this->recordings.size() >= 1) {
                 jit_log(LogLevel::Info,
                         "Function input missmatch! Function will be retraced.");
+                key.log_diff(&prev_key);
             }
             // FunctionRecording recording;
             auto recording = std::make_unique<FunctionRecording>();
@@ -941,6 +1083,7 @@ struct FrozenFunction {
 
             in_variables.drop_variables();
 
+            this->prev_key = key;
             this->recordings.insert({std::move(key), std::move(recording)});
 
             return result;
