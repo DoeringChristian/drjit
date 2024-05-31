@@ -273,14 +273,18 @@ struct FlatVariables {
         std::vector<nb::object> fields;
         for (uint32_t id = 0; id < id_bound; ++id) {
             void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
+            if (!ptr)
+                continue;
 
             // WARN: very unsafe cast!
             nb::intrusive_base *base = (nb::intrusive_base *)ptr;
             nb::handle inst_obj = base->self_py();
-
-            fields.push_back(nb::borrow(inst_obj.type()));
-
-            traverse(inst_obj);
+            if (inst_obj.ptr()) {
+                fields.push_back(nb::borrow(inst_obj.type()));
+                traverse(inst_obj);
+            } else {
+                nb::raise("Could not traverse non-python sub-type!");
+            }
         }
 
         this->layout[layout_index].num = id_bound;
@@ -502,13 +506,19 @@ struct FlatVariables {
 
         for (uint32_t id = 0; id < id_bound; ++id) {
             void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
+            if(!ptr)
+                continue;
 
             // WARN: very unsafe cast!
             nb::intrusive_base *base = (nb::intrusive_base *)ptr;
             nb::handle inst_obj = base->self_py();
-
+            
             // TODO: what should we acctually do in this case?
-            construct();
+            if (inst_obj.ptr()) {
+                construct();
+            } else {
+                nb::raise("Could not traverse non-python sub-type!");
+            }
         }
 
         return result;
@@ -716,12 +726,19 @@ static void transform_in_place_dr_class(nb::handle h,
             domain.c_str());
     for (uint32_t id = 0; id < id_bound; ++id) {
         void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
-
+        if (!ptr)
+            continue;
+        
         // WARN: very unsafe cast!
         nb::intrusive_base *base = (nb::intrusive_base *)ptr;
         nb::handle inst_obj = base->self_py();
+        
+        if (inst_obj.ptr()) {
+            transform_in_place(inst_obj, op);
+        } else {
+            nb::raise("Could not traverse non-python sub-type!");
+        }
 
-        transform_in_place(inst_obj, op);
     }
 }
 static void transform_in_place_dr(nb::handle h, TransformInPlaceCallback &op) {
@@ -772,7 +789,7 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
         }
     } else {
         if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()) {
-            for (auto k: ds.keys()) {
+            for (auto k : ds.keys()) {
                 transform_in_place(nb::getattr(h, k), op);
             }
         } else if (nb::object df = get_dataclass_fields(tp)) {
