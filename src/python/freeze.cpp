@@ -99,13 +99,6 @@ struct Layout {
     }
 };
 
-nb::object init_from_index(nb::type_object type, uint32_t variable_index) {
-    auto result = nb::inst_alloc_zero(type);
-    const ArraySupplement &s = supp(result.type());
-    s.init_index(variable_index, inst_ptr(result));
-    return result;
-}
-
 struct FlatVariables {
 
     // Variables, used to iterate over the variables/layouts when constructing
@@ -247,6 +240,32 @@ struct FlatVariables {
         this->add_flat_dr_var_index(index, h.type());
     }
 
+    void traverse_cb(const drjit::TraversableBase *traversable,
+                     nb::object type = nb::none()) {
+
+        Layout layout;
+        layout.type = nb::borrow<nb::type_object>(type);
+        size_t layout_index = this->layout.size();
+        this->layout.push_back(layout);
+
+        uint32_t num_fileds = 0;
+
+        struct Payload {
+            FlatVariables *flat_vars;
+            uint32_t num_fields;
+        };
+        Payload payload{this, 0};
+        traversable->traverse_1_cb_ro(
+            (void *)&payload, [](void *p, uint64_t index) {
+                Payload *payload = (Payload *)p;
+                payload->num_fields++;
+                // TODO: handle differentiable variables
+                payload->flat_vars->add_flat_dr_var_index(index);
+            });
+
+        this->layout[layout_index].num = payload.num_fields;
+    }
+
     /**
      * Traverse a variable and it's derived variables.
      */
@@ -278,10 +297,15 @@ struct FlatVariables {
 
             // WARN: very unsafe cast!
             nb::intrusive_base *base = (nb::intrusive_base *)ptr;
+            const drjit::TraversableBase *traversable =
+                dynamic_cast<drjit::TraversableBase *>(base);
             nb::handle inst_obj = base->self_py();
+
             if (inst_obj.ptr()) {
                 fields.push_back(nb::borrow(inst_obj.type()));
                 traverse(inst_obj);
+            } else if (traversable) {
+                traverse_cb(traversable);
             } else {
                 nb::raise("Could not traverse non-python sub-type!");
             }
@@ -506,13 +530,15 @@ struct FlatVariables {
 
         for (uint32_t id = 0; id < id_bound; ++id) {
             void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
-            if(!ptr)
+            if (!ptr)
                 continue;
 
             // WARN: very unsafe cast!
             nb::intrusive_base *base = (nb::intrusive_base *)ptr;
+            drjit::TraversableBase *traversable =
+                dynamic_cast<drjit::TraversableBase *>(base);
             nb::handle inst_obj = base->self_py();
-            
+
             // TODO: what should we acctually do in this case?
             if (inst_obj.ptr()) {
                 construct();
@@ -601,7 +627,7 @@ struct FlatVariables {
             return layout.type(**dict);
         } else if (nb::object cb = get_traverse_cb_rw(layout.type);
                    cb.is_valid()) {
-            nb::object result = nb::inst_alloc_zero(layout.type);
+            nb::object result = layout.type();
 
             cb(result, nb::cpp_function([&](uint64_t) {
                    Layout &layout = this->layout[layout_index++];
@@ -710,6 +736,27 @@ static void transform_in_place_dr_flat(nb::handle h,
     ad_var_dec_ref(new_index);
 }
 
+void transform_in_place_traversable(drjit::TraversableBase *traversable,
+                                    TransformInPlaceCallback &cb) {
+    struct Payload {
+        TransformInPlaceCallback &cb;
+        std::vector<uint64_t> tmp;
+    };
+    Payload payload{cb, std::vector<uint64_t>()};
+    traversable->traverse_1_cb_rw((void *)&payload,
+                                  [](void *p, uint64_t index) {
+                                      Payload *payload = (Payload *)p;
+
+                                      uint64_t new_index = payload->cb(index);
+                                      payload->tmp.push_back(new_index);
+                                      return new_index;
+                                  });
+
+    for (uint64_t index : payload.tmp) {
+        ad_var_dec_ref(index);
+    }
+}
+
 static void transform_in_place_dr_class(nb::handle h,
                                         TransformInPlaceCallback &op) {
     nb::handle tp = h.type();
@@ -728,17 +775,19 @@ static void transform_in_place_dr_class(nb::handle h,
         void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
         if (!ptr)
             continue;
-        
+
         // WARN: very unsafe cast!
         nb::intrusive_base *base = (nb::intrusive_base *)ptr;
+        const drjit::TraversableBase *traversable =
+            dynamic_cast<drjit::TraversableBase *>(base);
         nb::handle inst_obj = base->self_py();
-        
+
         if (inst_obj.ptr()) {
             transform_in_place(inst_obj, op);
+        } else if (traversable) {
         } else {
             nb::raise("Could not traverse non-python sub-type!");
         }
-
     }
 }
 static void transform_in_place_dr(nb::handle h, TransformInPlaceCallback &op) {
