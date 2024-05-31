@@ -254,7 +254,7 @@ struct FlatVariables {
         const ArraySupplement &s = supp(h.type());
 
         jit_log(LogLevel::Debug,
-                "traverse(): Found class variable on backen %u", backend);
+                "traverse(): Found class variable on backend %u", backend);
 
         // Add the base type (hopefully)
         size_t layout_index = this->layout.size();
@@ -265,11 +265,12 @@ struct FlatVariables {
 
         uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
 
-        this->layout[layout_index].num = id_bound;
-
         jit_log(LogLevel::Debug,
                 "traverse(): Traversing %u instances of domain \"%s\".",
                 id_bound, domain.c_str());
+
+        // We use types of the subtypes as fields.
+        std::vector<nb::object> fields;
         for (uint32_t id = 0; id < id_bound; ++id) {
             void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
 
@@ -277,8 +278,13 @@ struct FlatVariables {
             nb::intrusive_base *base = (nb::intrusive_base *)ptr;
             nb::handle inst_obj = base->self_py();
 
+            fields.push_back(nb::borrow(inst_obj.type()));
+
             traverse(inst_obj);
         }
+
+        this->layout[layout_index].num = id_bound;
+        this->layout[layout_index].fields = std::move(fields);
     }
 
     void add_dr_var(nb::handle h) {
@@ -680,16 +686,64 @@ struct TransformInPlaceCallback {
     };
 };
 
+static void transform_in_place(nb::handle h, TransformInPlaceCallback &op);
+
+static void transform_in_place_dr_flat(nb::handle h,
+                                       TransformInPlaceCallback &op) {
+    nb::handle tp = h.type();
+
+    const ArraySupplement &s = supp(tp);
+
+    uint64_t index = s.index(inst_ptr(h));
+    uint64_t new_index = op(index);
+    s.reset_index(new_index, inst_ptr(h));
+    ad_var_dec_ref(new_index);
+}
+
+static void transform_in_place_dr_class(nb::handle h,
+                                        TransformInPlaceCallback &op) {
+    nb::handle tp = h.type();
+    const ArraySupplement &s = supp(tp);
+
+    transform_in_place_dr_flat(h, op);
+
+    JitBackend backend = (JitBackend)s.backend;
+    nb::str domain = nb::borrow<nb::str>(nb::getattr(tp, "Domain"));
+
+    uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
+
+    jit_log(LogLevel::Debug, "transforming %u subtypes of domain %s", id_bound,
+            domain.c_str());
+    for (uint32_t id = 0; id < id_bound; ++id) {
+        void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
+
+        // WARN: very unsafe cast!
+        nb::intrusive_base *base = (nb::intrusive_base *)ptr;
+        nb::handle inst_obj = base->self_py();
+
+        transform_in_place(inst_obj, op);
+    }
+}
+static void transform_in_place_dr(nb::handle h, TransformInPlaceCallback &op) {
+    nb::handle tp = h.type();
+
+    const ArraySupplement &s = supp(tp);
+
+    if (s.is_class)
+        transform_in_place_dr_class(h, op);
+    else
+        transform_in_place_dr_flat(h, op);
+}
+
 static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
     nb::handle tp = h.type();
+
+    nb::print(tp);
 
     if (is_drjit_type(tp)) {
         const ArraySupplement &s = supp(tp);
         if (s.is_tensor) {
-            uint64_t index = s.index(inst_ptr(h));
-            uint64_t new_index = op(index);
-            s.reset_index(new_index, inst_ptr(h));
-            ad_var_dec_ref(new_index);
+            transform_in_place_dr(h, op);
         } else if (s.ndim > 1) {
             Py_ssize_t len = s.shape[0];
             if (len == DRJIT_DYNAMIC)
@@ -699,10 +753,7 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
                 transform_in_place(h[i], op);
             }
         } else {
-            uint64_t index = s.index(inst_ptr(h));
-            uint64_t new_index = op(index);
-            s.reset_index(new_index, inst_ptr(h));
-            ad_var_dec_ref(new_index);
+            transform_in_place_dr(h, op);
         }
     } else if (tp.is(&PyTuple_Type)) {
         nb::tuple tuple = nb::borrow<nb::tuple>(h);
@@ -721,8 +772,8 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
         }
     } else {
         if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()) {
-            for (auto [k, v] : ds) {
-                transform_in_place(v, op);
+            for (auto k: ds.keys()) {
+                transform_in_place(nb::getattr(h, k), op);
             }
         } else if (nb::object df = get_dataclass_fields(tp)) {
             for (nb::handle field : df) {
@@ -896,7 +947,8 @@ struct RecordingKey {
     std::vector<Layout> layout;
     uint32_t flags;
 
-    RecordingKey(){}
+    RecordingKey() {
+    }
     RecordingKey(std::vector<Layout> layout, uint32_t flags)
         : layout(std::move(layout)), flags(flags) {
     }
@@ -1009,8 +1061,8 @@ struct RecordingKeyHasher {
 };
 
 using RecordingMap =
-    tsl::robin_map<RecordingKey,
-                   std::unique_ptr<FunctionRecording>, RecordingKeyHasher>;
+    tsl::robin_map<RecordingKey, std::unique_ptr<FunctionRecording>,
+                   RecordingKeyHasher>;
 
 struct FrozenFunction {
     nb::callable func;
@@ -1057,8 +1109,7 @@ struct FrozenFunction {
                  "variable to frozen function!");
 
         uint32_t flags = jit_flags();
-        auto key = RecordingKey(
-            std::move(in_variables.layout), flags);
+        auto key = RecordingKey(std::move(in_variables.layout), flags);
         auto it = this->recordings.find(key);
 
         if (it == this->recordings.end()) {
