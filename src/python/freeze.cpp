@@ -570,6 +570,8 @@ struct FlatVariables {
         }
 
         Layout &layout = this->layout[layout_index++];
+        jit_log(LogLevel::Debug, "construct(): type=%s",
+                nb::type_name(layout.type).c_str());
         if (layout.type.is(nb::none().type())) {
             return nb::none();
         }
@@ -640,79 +642,196 @@ struct FlatVariables {
             return layout.py_object;
         }
     }
-};
 
-/**
- * Recursively assigns the drjit variables in the PyTree `src` to the object
- * `dst`. This is used to update the input of frozen functions, if their indices
- * should have changed.
- * It allso asigns new key-value pairs to dictionaries if these have been added
- * during the recording of a frozen function.
- */
-void assign(nb::handle dst, nb::handle src) {
-    nb::handle src_tp = src.type();
-    nb::handle dtp = dst.type();
-    raise_if(!src_tp.equal(dtp), "Type missmatch!");
-
-    if (is_drjit_type(src_tp)) {
-        const ArraySupplement &s = supp(src_tp);
-        if (s.is_tensor) {
-            s.reset_index(s.index(inst_ptr(src)), inst_ptr(dst));
-        } else if (s.ndim > 1) {
-            Py_ssize_t len = s.shape[0];
-            if (len == DRJIT_DYNAMIC)
-                len = s.len(inst_ptr(src));
-
-            for (Py_ssize_t i = 0; i < len; ++i) {
-                assign(dst[i], src[i]);
-            }
-        } else {
-            s.reset_index(s.index(inst_ptr(src)), inst_ptr(dst));
-        }
-    } else if (src_tp.is(&PyTuple_Type)) {
-        nb::tuple src_tuple = nb::borrow<nb::tuple>(src);
-        nb::tuple dst_tuple = nb::borrow<nb::tuple>(dst);
-        for (uint32_t i = 0; i < src_tuple.size(); ++i) {
-            assign(dst_tuple[i], src_tuple[i]);
-        }
-    } else if (src_tp.is(&PyList_Type)) {
-        nb::list src_list = nb::borrow<nb::list>(src);
-        nb::list dst_list = nb::borrow<nb::list>(dst);
-        for (uint32_t i = 0; i < src_list.size(); ++i) {
-            assign(dst_list[i], src_list[i]);
-        }
-    } else if (src_tp.is(&PyDict_Type)) {
-        nb::dict src_dict = nb::borrow<nb::dict>(src);
-        nb::dict dst_dict = nb::borrow<nb::dict>(dst);
-        for (auto k : src_dict.keys()) {
-            if (dst_dict.contains(k)) {
-                assign(dst_dict[k], src_dict[k]);
-            } else {
-                dst_dict[k] = src_dict[k];
-            }
-        }
-    } else {
-        if (nb::dict ds = get_drjit_struct(src_tp); ds.is_valid()) {
-            for (auto [k, v] : ds) {
-                assign(nb::getattr(dst, k), nb::getattr(src, k));
-            }
-        } else if (nb::object df = get_dataclass_fields(src_tp)) {
-            for (nb::handle field : df) {
-                nb::object k = field.attr(DR_STR(name));
-                assign(nb::getattr(dst, k), nb::getattr(src, k));
-            }
-        } else if (nb::object src_cb = get_traverse_cb_ro(src_tp),
-                   dst_cb = get_traverse_cb_rw(dtp);
-                   src_cb.is_valid() && dst_cb.is_valid()) {
+    void assign_cb(drjit::TraversableBase *traversable) {
+        struct Payload {
+            FlatVariables *flat_vars;
             std::vector<uint64_t> tmp;
-            src_cb(src, nb::cpp_function(
-                            [&](uint64_t index) { tmp.push_back(index); }));
-            size_t i = 0;
-            dst_cb(dst, nb::cpp_function([&](uint64_t) { return tmp[i++]; }));
+        };
+        Payload payload{this, std::vector<uint64_t>()};
+        traversable->traverse_1_cb_rw((void *)&payload, [](void *p,
+                                                           uint64_t index) {
+            Payload *payload = (Payload *)p;
+
+            Layout &layout =
+                payload->flat_vars->layout[payload->flat_vars->layout_index++];
+
+            if (layout.vt != (VarType)jit_var_type(index))
+                jit_fail("VarType missmatch!");
+
+            uint64_t new_index =
+                payload->flat_vars->construct_dr_var_index(layout);
+            payload->tmp.push_back(new_index);
+            return new_index;
+        });
+    }
+
+    void assign_flat_dr_var(Layout &layout, nb::handle dst) {
+        const ArraySupplement &s = supp(layout.type);
+        if (layout.vs == VarState::Literal) {
+            uint32_t index =
+                jit_var_literal(this->backend, layout.vt, &layout.literal);
+
+            s.reset_index(index, inst_ptr(dst));
+
+            // Have to decrement reference, as it is not part of `variables` and
+            // will not be freed
+            jit_var_dec_ref(index);
         } else {
+            uint32_t index = this->variables[layout.index];
+            s.reset_index(index, inst_ptr(dst));
         }
     }
-}
+    void assign_dr_class(Layout &layout, nb::handle dst) {
+        jit_log(LogLevel::Debug, "test");
+        const ArraySupplement &s = supp(layout.type);
+
+        JitBackend backend = (JitBackend)s.backend;
+        nb::str domain =
+            nb::borrow<nb::str>(nb::getattr(layout.type, "Domain"));
+
+        uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
+        if (id_bound != layout.num) {
+            jit_fail("Number of sub-types registered with backend changed "
+                     "during recording!");
+        }
+
+        assign_flat_dr_var(layout, dst);
+
+        for (uint32_t id = 0; id < id_bound; ++id) {
+            void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
+            if (!ptr)
+                continue;
+
+            // WARN: very unsafe cast!
+            nb::intrusive_base *base = (nb::intrusive_base *)ptr;
+            drjit::TraversableBase *traversable =
+                dynamic_cast<drjit::TraversableBase *>(base);
+            nb::handle inst_obj = base->self_py();
+
+            if (inst_obj.ptr()) {
+                assign(inst_obj);
+            } else if (traversable) {
+                assign_cb(traversable);
+            } else {
+                nb::raise("Could not traverse non-python sub-type!");
+            }
+        }
+    }
+
+    void assign_dr_var(Layout &layout, nb::handle dst) {
+        const ArraySupplement &s = supp(layout.type);
+        if (s.is_class)
+            assign_dr_class(layout, dst);
+        else
+            assign_flat_dr_var(layout, dst);
+    }
+
+    /**
+     * Assigns the flattened variables to a already existing PyTree.
+     * This is used when input variables are changed.
+     */
+    void assign(nb::handle dst) {
+        nb::handle tp = dst.type();
+        Layout &layout = this->layout[layout_index++];
+
+        nb::print(tp);
+
+        if (!layout.type.equal(tp))
+            nb::raise("Type missmatch! Type of original object %s does not "
+                      "match type of new object %s.",
+                      nb::type_name(tp).c_str(),
+                      nb::type_name(layout.type).c_str());
+
+        try {
+            if (is_drjit_type(tp)) {
+                const ArraySupplement &s = supp(tp);
+
+                if (s.is_tensor) {
+                    assign_dr_var(layout, dst);
+                } else if (s.ndim != 1) {
+                    Py_ssize_t len = s.shape[0];
+                    if (len == DRJIT_DYNAMIC)
+                        len = s.len(inst_ptr(dst));
+
+                    for (Py_ssize_t i = 0; i < len; ++i)
+                        assign(dst[i]);
+                } else {
+                    assign_dr_var(layout, dst);
+                }
+            } else if (tp.is(&PyTuple_Type)) {
+                nb::tuple tuple = nb::borrow<nb::tuple>(dst);
+                raise_if(tuple.size() != layout.num, "");
+
+                for (nb::handle h2 : tuple)
+                    assign(h2);
+            } else if (tp.is(&PyList_Type)) {
+                nb::list list = nb::borrow<nb::list>(dst);
+                raise_if(list.size() != layout.num, "");
+
+                for (nb::handle h2 : list)
+                    assign(h2);
+            } else if (tp.is(&PyDict_Type)) {
+                nb::dict dict = nb::borrow<nb::dict>(dst);
+                for (auto &k : layout.fields) {
+                    if (dict.contains(&k))
+                        assign(dict[k]);
+                    else
+                        dst[k] = construct();
+                }
+            } else if (nb::dict ds = get_drjit_struct(dst); ds.is_valid()) {
+                for (auto &k : layout.fields) {
+                    if (nb::hasattr(dst, k))
+                        assign(nb::getattr(dst, k));
+                    else
+                        nb::setattr(dst, k, construct());
+                }
+            } else if (nb::object df = get_dataclass_fields(tp);
+                       df.is_valid()) {
+                for (auto k : layout.fields) {
+                    if (nb::hasattr(dst, k))
+                        assign(nb::getattr(dst, k));
+                    else
+                        nb::setattr(dst, k, construct());
+                }
+            } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
+                std::vector<uint64_t> tmp;
+                cb(dst, nb::cpp_function([&](uint64_t index) {
+                       Layout &layout = this->layout[layout_index++];
+                       if (layout.vt != (VarType)jit_var_type(index))
+                           jit_fail("VarType missmatch!");
+
+                       uint64_t new_index =
+                           this->construct_dr_var_index(layout);
+                       tmp.push_back(new_index);
+                       return new_index;
+                   }));
+            } else {
+            }
+        } catch (nb::python_error &e) {
+            nb::raise_from(e, PyExc_RuntimeError,
+                           "FlatVariables::assign(): error encountered while "
+                           "processing an argument "
+                           "of type '%U' (see above).",
+                           nb::type_name(tp).ptr());
+        } catch (const std::exception &e) {
+            nb::chain_error(PyExc_RuntimeError,
+                            "FlatVariables::assign(): error encountered "
+                            "while processing an argument "
+                            "of type '%U': %s",
+                            nb::type_name(tp).ptr(), e.what());
+            nb::raise_python_error();
+        }
+    }
+
+    void log_layout() const {
+        for (uint32_t i = this->layout_index; i < this->layout.size(); ++i) {
+            const Layout &layout = this->layout[i];
+            jit_log(LogLevel::Debug, "layout.type=%s, layout.num=%u",
+                    nb::type_name(layout.type).c_str(), layout.num);
+        }
+    }
+};
 
 struct TransformInPlaceCallback {
     // The transform operation, applied to each index.
@@ -976,12 +1095,10 @@ struct FunctionRecording {
                           out_variables.variables.data());
         jit_log(LogLevel::Info, "Replaying done:");
 
-        out_variables.layout_index = 0;
-        auto output = nb::borrow<nb::list>(out_variables.construct());
-        auto result = output[0];
-        auto new_input = output[1];
-
-        assign(input, new_input);
+        // out_variables.log_layout();
+        out_variables.layout_index = 1;
+        auto result = nb::borrow<nb::list>(out_variables.construct());
+        out_variables.assign(input);
 
         // out_variables is assigned by jit_record_replay, which transfers
         // ownership to this array. Therefore, we have to drop the variables
