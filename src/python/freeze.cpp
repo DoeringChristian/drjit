@@ -36,6 +36,9 @@ struct Layout {
     /// Such arrays are handled differently by the compiler.
     bool singleton_array = false;
     bool unaligned = false;
+    /// Weather this variable represents a value and it's gradient
+    /// The actual value and gradient layout is handled by the children.
+    bool grad_enabled = false;
     /// The literal data
     uint64_t literal = 0;
     /// The index in the flat_variables array of this variable.
@@ -168,10 +171,12 @@ struct FlatVariables {
     }
 
     /**
-     * Add flat drjit variable by index.
+     * Add jit variable by index.
+     * Takes an optional type.
      */
-    void add_flat_dr_var_index(uint32_t index, nb::handle tp = nb::none()) {
-        JitBackend var_backend = (JitBackend)jit_var_backend(index);
+    void add_var_jit_index(uint32_t index, nb::handle tp = nb::none()) {
+        VarInfo info = jit_set_backend(index);
+        JitBackend var_backend = info.backend;
 
         if (this->backend == var_backend || this->backend == JitBackend::None) {
             this->backend = var_backend;
@@ -194,9 +199,6 @@ struct FlatVariables {
             nb::raise("Pointer inputs not yet supported!");
         }
 
-        raise_if(ad_grad_enabled(index), "Passing gradients into/out of a "
-                                         "frozen function is not supported!");
-
         Layout layout;
         VarState vs = jit_var_state(index);
         layout.type = nb::borrow<nb::type_object>(tp);
@@ -205,13 +207,9 @@ struct FlatVariables {
 
         if (vs == VarState::Literal) {
             jit_log(LogLevel::Info, "    vs=Literal");
-
-            raise_if(jit_var_size(index) > 1,
-                     "collect(): Size larger than 1 not supported yet!");
-
-            // NOTE: This should not cause any new operations to be recorded, as
-            // we have stablished that the variable is a literal.
             jit_var_read(index, 0, &layout.literal);
+            // Store size in index variable, as this is not used for literals
+            layout.index = jit_var_size(index);
         } else if (vs == VarState::Evaluated) {
             jit_log(LogLevel::Info, "    vs=%s", jit_var_kind_name(index));
             layout.index = this->add_variable_index(index);
@@ -226,23 +224,53 @@ struct FlatVariables {
         }
         this->layout.push_back(layout);
     }
+    /**
+     * Add an ad variable by it's index.
+     * Takes an optional type.
+     */
+    void add_var_ad_index(uint64_t index, nb::handle tp = nb::none()) {
+        int grad_enabled = ad_grad_enabled(index);
+        jit_log(LogLevel::Debug,
+                "traverse(): adding ad var 0x%016llx = (var=%u, ad=%u, "
+                "grad_enabled=%u)",
+                index, index, (index >> 32), grad_enabled);
+        if (grad_enabled) {
+            jit_log(LogLevel::Debug, " => collecting ad var");
+            Layout layout;
+            layout.type = nb::borrow<nb::type_object>(tp);
+            layout.num = 2;
+            layout.grad_enabled = true;
+            this->layout.push_back(layout);
 
-    void add_flat_dr_var(nb::handle h) {
+            add_var_jit_index(index, tp);
+            uint32_t grad = ad_grad(index);
+            add_var_jit_index(grad, tp);
+            jit_var_dec_ref(grad);
+        } else {
+            jit_log(LogLevel::Debug, " => collecting jit var");
+            add_var_jit_index(index, tp);
+        }
+    }
+
+    /**
+     * Add an ad attached variable from it's nanobind handle.
+     */
+    void add_var_ad(nb::handle h) {
         auto s = supp(h.type());
 
         raise_if(s.index == nullptr, "freeze(): ArraySupplement index function "
                                      "pointer is nullptr.");
-        // raise_if(s.is_class,
-        //          "freeze(): Class variables are not yet supported!");
 
         uint64_t index = s.index(inst_ptr(h));
 
-        this->add_flat_dr_var_index(index, h.type());
+        this->add_var_ad_index(index, h.type());
     }
 
+    /**
+     * Traverse a c++ tree using it's `traverse_1_cb_ro` callback.
+     */
     void traverse_cb(const drjit::TraversableBase *traversable,
                      nb::object type = nb::none()) {
-
         Layout layout;
         layout.type = nb::borrow<nb::type_object>(type);
         size_t layout_index = this->layout.size();
@@ -259,17 +287,16 @@ struct FlatVariables {
             (void *)&payload, [](void *p, uint64_t index) {
                 Payload *payload = (Payload *)p;
                 payload->num_fields++;
-                // TODO: handle differentiable variables
-                payload->flat_vars->add_flat_dr_var_index(index);
+                payload->flat_vars->add_var_ad_index(index);
             });
 
         this->layout[layout_index].num = payload.num_fields;
     }
 
     /**
-     * Traverse a variable and it's derived variables.
+     * Traverse a polymorphic variable, and it's subtypes.
      */
-    void add_dr_class_var(nb::handle h) {
+    void add_var_class(nb::handle h) {
         const ArraySupplement &s = supp(h.type());
 
         jit_log(LogLevel::Debug,
@@ -277,7 +304,7 @@ struct FlatVariables {
 
         // Add the base type (hopefully)
         size_t layout_index = this->layout.size();
-        add_flat_dr_var(h);
+        add_var_ad(h);
 
         JitBackend backend = (JitBackend)s.backend;
         nb::str domain = nb::borrow<nb::str>(nb::getattr(h.type(), "Domain"));
@@ -322,9 +349,9 @@ struct FlatVariables {
 
         // Handle class var
         if (s.is_class) {
-            add_dr_class_var(h);
+            add_var_class(h);
         } else {
-            add_flat_dr_var(h);
+            add_var_ad(h);
         }
     }
 
@@ -333,7 +360,7 @@ struct FlatVariables {
      * `layout` vector.
      *
      * When hitting a drjit primitive type, it calls the
-     * `collect` method, which will add their indices to the `flat_variables`
+     * `add_dr_var` method, which will add their indices to the `flat_variables`
      * vector.
      * The collect method will also record metadata about the drjit variable in
      * the layout.
@@ -440,7 +467,7 @@ struct FlatVariables {
 
                 cb(h, nb::cpp_function([&](uint64_t index) {
                        num_fileds++;
-                       this->add_flat_dr_var_index(index, nb::none());
+                       this->add_var_ad_index(index, nb::none());
                    }));
 
                 // Update layout number of fields
@@ -478,18 +505,17 @@ struct FlatVariables {
     }
 
     /**
-     * Construct the variable index given a layout.
-     * This corresponds to `add_variable_index` and `add_flat_dr_var_index`.
-     *
-     * It returns a owning reference.
+     * Construct a variable, given it's layout.
      */
-    uint64_t construct_variable_index(Layout &layout) {
+    uint32_t construct_jit_index(const Layout &layout) {
         if (layout.vs == VarState::Literal) {
-            uint32_t index =
-                jit_var_literal(this->backend, layout.vt, &layout.literal);
+            jit_log(LogLevel::Debug, "construct(): literal");
+            uint32_t index = jit_var_literal(this->backend, layout.vt,
+                                             &layout.literal, layout.index);
 
             return index;
         } else {
+            jit_log(LogLevel::Debug, "construct(): evaluated");
             uint32_t index = this->variables[layout.index];
 
             jit_var_inc_ref(index);
@@ -498,8 +524,43 @@ struct FlatVariables {
         }
     }
 
-    nb::object construct_flat_dr_var(Layout &layout) {
-        uint32_t index = construct_variable_index(layout);
+    /**
+     * Construct the variable index given a layout.
+     * This corresponds to `add_variable_index` and `add_flat_dr_var_index`.
+     *
+     * It returns a owning reference.
+     */
+    uint64_t construct_ad_index(const Layout &layout) {
+        if (layout.grad_enabled) {
+            Layout &val_layout = this->layout[layout_index++];
+            uint32_t val = construct_jit_index(val_layout);
+
+            Layout &grad_layout = this->layout[layout_index++];
+            uint32_t grad = construct_jit_index(grad_layout);
+
+            // Resize the gradient if it is a literal
+            if ((VarState)jit_var_state(grad) == VarState::Literal) {
+                uint32_t new_grad = jit_var_resize(grad, jit_var_size(val));
+                jit_var_dec_ref(grad);
+                grad = new_grad;
+            }
+
+            uint64_t ad_var = ad_var_new(val);
+            jit_var_dec_ref(val);
+
+            ad_clear_grad(ad_var);
+            ad_accum_grad(ad_var, grad);
+            jit_var_dec_ref(grad);
+
+            return ad_var;
+
+        } else {
+            return construct_jit_index(layout);
+        }
+    }
+
+    nb::object construct_flat_dr_var(const Layout &layout) {
+        uint64_t index = construct_ad_index(layout);
 
         auto result = nb::inst_alloc_zero(layout.type);
         const ArraySupplement &s = supp(result.type());
@@ -507,12 +568,12 @@ struct FlatVariables {
 
         // Have to decrement reference, as it is not part of `variables` and
         // will not be freed
-        jit_var_dec_ref(index);
+        ad_var_dec_ref(index);
 
         return result;
     }
 
-    nb::object construct_dr_class_var(Layout &layout) {
+    nb::object construct_dr_class_var(const Layout &layout) {
         const ArraySupplement &s = supp(layout.type);
 
         JitBackend backend = (JitBackend)s.backend;
@@ -549,7 +610,7 @@ struct FlatVariables {
         return result;
     }
 
-    nb::object construct_dr_var(Layout &layout) {
+    nb::object construct_dr_var(const Layout &layout) {
         const ArraySupplement &s = supp(layout.type);
 
         if (s.is_class) {
@@ -568,7 +629,7 @@ struct FlatVariables {
             return nb::none();
         }
 
-        Layout &layout = this->layout[layout_index++];
+        const Layout &layout = this->layout[layout_index++];
         jit_log(LogLevel::Debug, "construct(): type=%s",
                 nb::type_name(layout.type).c_str());
         if (layout.type.is(nb::none().type())) {
@@ -633,7 +694,7 @@ struct FlatVariables {
 
             cb(result, nb::cpp_function([&](uint64_t) {
                    Layout &layout = this->layout[layout_index++];
-                   uint64_t new_index = construct_variable_index(layout);
+                   uint64_t new_index = construct_ad_index(layout);
                    tmp.push_back(new_index);
                    return new_index;
                }));
@@ -664,8 +725,7 @@ struct FlatVariables {
             if (layout.vt != (VarType)jit_var_type(index))
                 jit_fail("VarType missmatch!");
 
-            uint64_t new_index =
-                payload->flat_vars->construct_variable_index(layout);
+            uint64_t new_index = payload->flat_vars->construct_ad_index(layout);
             payload->tmp.push_back(new_index);
             return new_index;
         });
@@ -676,14 +736,13 @@ struct FlatVariables {
     void assign_flat_dr_var(Layout &layout, nb::handle dst) {
         const ArraySupplement &s = supp(layout.type);
 
-        uint64_t index = construct_variable_index(layout);
+        uint64_t index = construct_ad_index(layout);
 
         s.reset_index(index, inst_ptr(dst));
 
         ad_var_dec_ref(index);
     }
     void assign_dr_class(Layout &layout, nb::handle dst) {
-        jit_log(LogLevel::Debug, "test");
         const ArraySupplement &s = supp(layout.type);
 
         JitBackend backend = (JitBackend)s.backend;
@@ -801,8 +860,7 @@ struct FlatVariables {
                        if (layout.vt != (VarType)jit_var_type(index))
                            jit_fail("VarType missmatch!");
 
-                       uint64_t new_index =
-                           this->construct_variable_index(layout);
+                       uint64_t new_index = this->construct_ad_index(layout);
                        tmp.push_back(new_index);
                        return new_index;
                    }));
@@ -925,8 +983,6 @@ static void transform_in_place_dr(nb::handle h, TransformInPlaceCallback &op) {
 static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
     nb::handle tp = h.type();
 
-    nb::print(tp);
-
     if (is_drjit_type(tp)) {
         const ArraySupplement &s = supp(tp);
         if (s.is_tensor) {
@@ -985,25 +1041,90 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
     }
 }
 
-static void make_opaque(nb::handle h) {
+static void deep_make_opaque(nb::handle h) {
     jit_log(LogLevel::Debug, "make_opaque");
 
     struct ScheduleForceCallback : TransformInPlaceCallback {
         bool result = false;
 
         uint64_t operator()(uint64_t index) override {
-            int rv = 0;
-            uint64_t new_index = ad_var_schedule_force(index, &rv);
+            uint64_t new_index;
+            if (ad_grad_enabled(index)) {
+
+                uint32_t grad = ad_grad(index);
+
+                int rv = 0;
+                new_index = ad_var_schedule_force(index, &rv);
+                if (rv)
+                    result = true;
+
+                jit_log(LogLevel::Debug, "scheduling gradient");
+                rv = 0;
+                uint32_t new_grad = jit_var_schedule_force(grad, &rv);
+                jit_var_dec_ref(grad);
+                if (rv)
+                    result = true;
+
+                ad_clear_grad(new_index);
+                ad_accum_grad(new_index, new_grad);
+                jit_var_dec_ref(new_grad);
+            } else {
+                int rv = 0;
+                new_index = ad_var_schedule_force(index, &rv);
+                if (rv)
+                    result = true;
+            }
+
             jit_log(LogLevel::Debug, "    scheduled %zu -> %zu", index,
                     new_index);
-            if (rv)
-                result = true;
+            jit_log(LogLevel::Debug, "    state=%u", jit_var_state(new_index));
 
             return new_index;
         }
     };
 
     ScheduleForceCallback op;
+    transform_in_place(h, op);
+
+    if (op.result) {
+        nb::gil_scoped_release guard;
+        jit_eval();
+    }
+}
+
+static void deep_eval(nb::handle h) {
+    jit_log(LogLevel::Debug, "deep_schedule");
+
+    struct ScheduleCallback : TransformInPlaceCallback {
+        bool result = false;
+
+        uint64_t operator()(uint64_t index) override {
+            if (ad_grad_enabled(index)) {
+                int rv = 0;
+
+                if (jit_var_schedule(index))
+                    result = true;
+
+                uint32_t grad = ad_grad(index);
+                jit_log(LogLevel::Debug, "    scheduling gradient");
+                if (jit_var_schedule(grad))
+                    result = true;
+                jit_var_dec_ref(grad);
+
+            } else {
+                int rv = jit_var_schedule(index);
+                if (rv)
+                    result = true;
+            }
+            ad_var_inc_ref(index);
+
+            jit_log(LogLevel::Debug, "    scheduled %zu", index);
+
+            return index;
+        }
+    };
+
+    ScheduleCallback op;
     transform_in_place(h, op);
 
     if (op.result) {
@@ -1052,9 +1173,9 @@ struct FunctionRecording {
         output.append(result);
         output.append(input);
 
-        // NOTE: might want to make result opaque as well?
-        make_opaque(input);
-        eval(output);
+        // Eval the input and output and it's gradients.
+        deep_make_opaque(input);
+        deep_eval(output);
 
         jit_log(LogLevel::Info, "Traversing output");
 
@@ -1099,7 +1220,9 @@ struct FunctionRecording {
 
         // out_variables.log_layout();
         out_variables.layout_index = 1;
+        jit_log(LogLevel::Debug, "Construct:");
         auto result = nb::borrow<nb::list>(out_variables.construct());
+        jit_log(LogLevel::Debug, "Assign:");
         out_variables.assign(input);
 
         // out_variables is assigned by jit_record_replay, which transfers
@@ -1281,7 +1404,7 @@ struct FrozenFunction {
 
         // Evaluate input variables, forcing evaluation of undefined variables
         // NOTE: not sure, why both are necessary
-        make_opaque(input);
+        deep_make_opaque(input);
         eval(input);
 
         // Traverse input variables
