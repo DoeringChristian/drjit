@@ -140,7 +140,7 @@ struct FlatVariables {
      * This allows for checking for aliasing conditions, as aliasing inputs map
      * to the same flat variable index.
      */
-    uint32_t add_variable(uint32_t variable_index) {
+    uint32_t add_variable_index(uint32_t variable_index) {
         auto it = this->index_to_flat.find(variable_index);
 
         if (it == this->index_to_flat.end()) {
@@ -214,7 +214,7 @@ struct FlatVariables {
             jit_var_read(index, 0, &layout.literal);
         } else if (vs == VarState::Evaluated) {
             jit_log(LogLevel::Info, "    vs=%s", jit_var_kind_name(index));
-            layout.index = this->add_variable(index);
+            layout.index = this->add_variable_index(index);
             layout.singleton_array = jit_var_size(index) == 1;
             layout.unaligned = jit_var_is_unaligned(index);
         } else {
@@ -477,7 +477,13 @@ struct FlatVariables {
         }
     }
 
-    uint64_t construct_dr_var_index(Layout &layout) {
+    /**
+     * Construct the variable index given a layout.
+     * This corresponds to `add_variable_index` and `add_flat_dr_var_index`.
+     *
+     * It returns a owning reference.
+     */
+    uint64_t construct_variable_index(Layout &layout) {
         if (layout.vs == VarState::Literal) {
             uint32_t index =
                 jit_var_literal(this->backend, layout.vt, &layout.literal);
@@ -485,32 +491,25 @@ struct FlatVariables {
             return index;
         } else {
             uint32_t index = this->variables[layout.index];
+
+            jit_var_inc_ref(index);
 
             return index;
         }
     }
 
     nb::object construct_flat_dr_var(Layout &layout) {
-        if (layout.vs == VarState::Literal) {
-            uint32_t index =
-                jit_var_literal(this->backend, layout.vt, &layout.literal);
+        uint32_t index = construct_variable_index(layout);
 
-            auto result = nb::inst_alloc_zero(layout.type);
-            const ArraySupplement &s = supp(result.type());
-            s.init_index(index, inst_ptr(result));
+        auto result = nb::inst_alloc_zero(layout.type);
+        const ArraySupplement &s = supp(result.type());
+        s.init_index(index, inst_ptr(result));
 
-            // Have to decrement reference, as it is not part of `variables` and
-            // will not be freed
-            jit_var_dec_ref(index);
-            return result;
-        } else {
-            uint32_t index = this->variables[layout.index];
+        // Have to decrement reference, as it is not part of `variables` and
+        // will not be freed
+        jit_var_dec_ref(index);
 
-            auto result = nb::inst_alloc_zero(layout.type);
-            const ArraySupplement &s = supp(result.type());
-            s.init_index(index, inst_ptr(result));
-            return result;
-        }
+        return result;
     }
 
     nb::object construct_dr_class_var(Layout &layout) {
@@ -630,11 +629,17 @@ struct FlatVariables {
         } else if (nb::object cb = get_traverse_cb_rw(layout.type);
                    cb.is_valid()) {
             nb::object result = layout.type();
+            std::vector<uint64_t> tmp;
 
             cb(result, nb::cpp_function([&](uint64_t) {
                    Layout &layout = this->layout[layout_index++];
-                   return construct_dr_var_index(layout);
+                   uint64_t new_index = construct_variable_index(layout);
+                   tmp.push_back(new_index);
+                   return new_index;
                }));
+
+            for (uint32_t index : tmp)
+                ad_var_dec_ref(index);
 
             return result;
 
@@ -660,27 +665,22 @@ struct FlatVariables {
                 jit_fail("VarType missmatch!");
 
             uint64_t new_index =
-                payload->flat_vars->construct_dr_var_index(layout);
+                payload->flat_vars->construct_variable_index(layout);
             payload->tmp.push_back(new_index);
             return new_index;
         });
+        for (uint64_t index : payload.tmp)
+            ad_var_dec_ref(index);
     }
 
     void assign_flat_dr_var(Layout &layout, nb::handle dst) {
         const ArraySupplement &s = supp(layout.type);
-        if (layout.vs == VarState::Literal) {
-            uint32_t index =
-                jit_var_literal(this->backend, layout.vt, &layout.literal);
 
-            s.reset_index(index, inst_ptr(dst));
+        uint64_t index = construct_variable_index(layout);
 
-            // Have to decrement reference, as it is not part of `variables` and
-            // will not be freed
-            jit_var_dec_ref(index);
-        } else {
-            uint32_t index = this->variables[layout.index];
-            s.reset_index(index, inst_ptr(dst));
-        }
+        s.reset_index(index, inst_ptr(dst));
+
+        ad_var_dec_ref(index);
     }
     void assign_dr_class(Layout &layout, nb::handle dst) {
         jit_log(LogLevel::Debug, "test");
@@ -802,10 +802,12 @@ struct FlatVariables {
                            jit_fail("VarType missmatch!");
 
                        uint64_t new_index =
-                           this->construct_dr_var_index(layout);
+                           this->construct_variable_index(layout);
                        tmp.push_back(new_index);
                        return new_index;
                    }));
+                for (uint32_t index : tmp)
+                    ad_var_dec_ref(index);
             } else {
             }
         } catch (nb::python_error &e) {
