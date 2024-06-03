@@ -538,7 +538,7 @@ def test20_vcall_optimize(t, symbolic, optimize, opaque):
     A, B, Base, BasePtr = pkg.A, pkg.B, pkg.Base, pkg.BasePtr
     Mask = dr.mask_t(t)
     a, b = B(), B()
-    
+
     B.DRJIT_STRUCT = {"value": t, "opaque": t}
     A.DRJIT_STRUCT = {"value": t, "opaque": t}
 
@@ -1500,49 +1500,57 @@ def test33_simple_reductions(t):
         check_expected(sum_not_returned_single, np.sum(x_np).item() + 4)
 
 
-# def test34_reductions_with_ad():
-#     # dr.set_flag(dr.JitFlag.KernelFreezing, False)
-#     Float = dr.cuda.ad.Float32
-#     n = 37
-#
-#     @dr.kernel()
-#     def sum_with_ad(x, width_opaque):
-#         intermediate = 2 * x + 1
-#         dr.enable_grad(intermediate)
-#
-#         result = dr.sqr(intermediate)
-#
-#         # Unfortunately, as long as we don't support creating opaque values
-#         # within a frozen kernel, we can't use `dr.mean()` directly.
-#         loss = dr.sum(result) / width_opaque
-#         dr.backward(loss)
-#         return result, intermediate
-#
-#     @dr.kernel()
-#     def product_with_ad(x):
-#         dr.enable_grad(x)
-#         loss = dr.prod(x)
-#         dr.backward_from(loss)
-#
-#     for i in range(3):
-#         x = dr.linspace(Float, 0, 1, n + i) + dr.opaque(Float, i)
-#         result, intermediate = sum_with_ad(x, dr.opaque(Float, dr.width(x)))
-#
-#         assert dr.grad_enabled(result)
-#         assert dr.grad_enabled(intermediate)
-#         assert not dr.grad_enabled(x)
-#         intermediate_expected = 2 * x + 1
-#         assert dr.allclose(intermediate, intermediate_expected)
-#         assert dr.allclose(result, dr.sqr(intermediate_expected))
-#         assert dr.allclose(dr.grad(result), 0)
-#         assert dr.allclose(dr.grad(intermediate), 2 * intermediate_expected / dr.width(x))
-#
-#     for i in range(3):
-#         x = dr.linspace(Float, 0.1, 1, n + i) + dr.opaque(Float, i)
-#         result = product_with_ad(x)
-#
-#         assert result is None
-#         assert dr.grad_enabled(x)
-#         with dr.suspend_grad():
-#             expected_grad = dr.prod(x) / x
-#         assert dr.allclose(dr.grad(x), expected_grad)
+@pytest.test_arrays("float32, jit, is_diff, shape=(*)")
+def test34_reductions_with_ad(t):
+    # dr.set_flag(dr.JitFlag.KernelFreezing, False)
+    Float = t
+    n = 37
+
+    @dr.freeze
+    def sum_with_ad(x, width_opaque):
+        intermediate = 2 * x + 1
+        dr.enable_grad(intermediate)
+
+        result = dr.square(intermediate)
+
+        # Unfortunately, as long as we don't support creating opaque values
+        # within a frozen kernel, we can't use `dr.mean()` directly.
+        loss = dr.sum(result) / width_opaque
+        dr.backward(loss)
+
+        print(f"{dr.grad(intermediate).index=}")
+
+        return result, intermediate
+
+    @dr.freeze
+    def product_with_ad(x):
+        dr.enable_grad(x)
+        loss = dr.prod(x)
+        dr.backward_from(loss)
+
+    for i in range(1):
+        x = dr.linspace(Float, 0, 1, n + i) + dr.opaque(Float, i)
+        result, intermediate = sum_with_ad(x, dr.opaque(Float, dr.width(x)))
+        assert dr.width(result) == n + i
+
+        assert dr.grad_enabled(result)
+        assert dr.grad_enabled(intermediate)
+        assert not dr.grad_enabled(x)
+        intermediate_expected = 2 * x + 1
+        assert dr.allclose(intermediate, intermediate_expected)
+        assert dr.allclose(result, dr.square(intermediate_expected))
+        assert sum_with_ad.n_recordings == 1
+        assert dr.allclose(dr.grad(result), 0)
+        assert dr.allclose(
+            dr.grad(intermediate), 2 * intermediate_expected / dr.width(x)
+        )
+
+    for i in range(3):
+        x = dr.linspace(Float, 0.1, 1, n + i) + dr.opaque(Float, i)
+        result = product_with_ad(x)
+
+        assert result is None
+        assert dr.grad_enabled(x)
+        with dr.suspend_grad():
+            expected_grad = dr.prod(x) / x
+        assert dr.allclose(dr.grad(x), expected_grad)
