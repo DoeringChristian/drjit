@@ -17,6 +17,12 @@ static const char *doc_freeze = R"(
     
 )";
 
+enum class LayoutFlag : uint32_t {
+    SingletonArray = (1 << 0),
+    Unaligned = (1 << 1),
+    GradEnabled = (1 << 2),
+};
+
 /// Stores information about python objects, such as their type, their number of
 /// sub-elements or their field keys. This can be used to reconstruct a pytree
 /// from a flattened variable array.
@@ -34,11 +40,12 @@ struct Layout {
     VarState vs = VarState::Invalid;
     /// Weather the variable is an array with a single entry.
     /// Such arrays are handled differently by the compiler.
-    bool singleton_array = false;
-    bool unaligned = false;
-    /// Weather this variable represents a value and it's gradient
-    /// The actual value and gradient layout is handled by the children.
-    bool grad_enabled = false;
+    // bool singleton_array = false;
+    // bool unaligned = false;
+    // /// Weather this variable represents a value and it's gradient
+    // /// The actual value and gradient layout is handled by the children.
+    // bool grad_enabled = false;
+    uint32_t flags = 0;
     /// The literal data
     uint64_t literal = 0;
     /// The index in the flat_variables array of this variable.
@@ -78,12 +85,8 @@ struct Layout {
                     (uint32_t)rhs.vs);
             return false;
         }
-        if (this->singleton_array != rhs.singleton_array) {
-            jit_log(LogLevel::Warn, "    singleton_array");
-            return false;
-        }
-        if (this->unaligned != rhs.unaligned) {
-            jit_log(LogLevel::Warn, "    unaligned");
+        if (this->flags != rhs.flags) {
+            jit_log(LogLevel::Warn, "    flags");
             return false;
         }
         if (this->index != rhs.index) {
@@ -213,8 +216,16 @@ struct FlatVariables {
         } else if (vs == VarState::Evaluated) {
             jit_log(LogLevel::Info, "    vs=%s", jit_var_kind_name(index));
             layout.index = this->add_variable_index(index);
-            layout.singleton_array = jit_var_size(index) == 1;
-            layout.unaligned = jit_var_is_unaligned(index);
+            // bool singleton_array = jit_var_size(index) == 1;
+            bool unaligned = jit_var_is_unaligned(index);
+
+            layout.flags |=
+                (jit_var_size(index) == 1 ? (uint32_t)LayoutFlag::SingletonArray
+                                          : 0);
+            layout.flags |=
+                (jit_var_is_unaligned(index) ? (uint32_t)LayoutFlag::Unaligned
+                                             : 0);
+
         } else {
 
             jit_log(LogLevel::Error,
@@ -239,7 +250,7 @@ struct FlatVariables {
             Layout layout;
             layout.type = nb::borrow<nb::type_object>(tp);
             layout.num = 2;
-            layout.grad_enabled = true;
+            layout.flags |= (uint32_t)LayoutFlag::GradEnabled;
             this->layout.push_back(layout);
 
             add_var_jit_index(index, tp);
@@ -531,7 +542,7 @@ struct FlatVariables {
      * It returns a owning reference.
      */
     uint64_t construct_ad_index(const Layout &layout) {
-        if (layout.grad_enabled) {
+        if ((layout.flags & (uint32_t)LayoutFlag::GradEnabled) != 0) {
             Layout &val_layout = this->layout[layout_index++];
             uint32_t val = construct_jit_index(val_layout);
 
@@ -1299,12 +1310,9 @@ struct RecordingKey {
             if (lhs_layout.vs != rhs_layout.vs)
                 jit_log(LogLevel::Debug, "    vs: %u != %u", lhs_layout.vs,
                         rhs_layout.vs);
-            if (lhs_layout.singleton_array != rhs_layout.singleton_array)
+            if (lhs_layout.flags != rhs_layout.flags)
                 jit_log(LogLevel::Debug, "    singleton_array: %u != %u",
-                        lhs_layout.singleton_array, rhs_layout.singleton_array);
-            if (lhs_layout.unaligned != rhs_layout.unaligned)
-                jit_log(LogLevel::Debug, "    unaligned: %u != %u",
-                        lhs_layout.unaligned, rhs_layout.unaligned);
+                        lhs_layout.flags, rhs_layout.flags);
             if (lhs_layout.literal != rhs_layout.literal)
                 jit_log(LogLevel::Debug, "    literal: %u != %u",
                         lhs_layout.literal, rhs_layout.literal);
@@ -1332,8 +1340,7 @@ struct RecordingKey {
                     (uint32_t)layout.vt);
             jit_log(LogLevel::Debug, "            vs = %u,",
                     (uint32_t)layout.vs);
-            jit_log(LogLevel::Debug, "            singleton_array = %u,",
-                    layout.singleton_array);
+            jit_log(LogLevel::Debug, "            flags = %u,", layout.flags);
             jit_log(LogLevel::Debug, "        },");
         }
         jit_log(LogLevel::Debug, "    ]");
@@ -1355,8 +1362,7 @@ struct RecordingKeyHasher {
             }
             hash_combine(hash, (size_t)layout.vt);
             hash_combine(hash, (size_t)layout.vs);
-            hash_combine(hash, (size_t)layout.singleton_array);
-            hash_combine(hash, (size_t)layout.unaligned);
+            hash_combine(hash, (size_t)layout.flags);
             hash_combine(hash, (size_t)layout.literal);
             hash_combine(hash, (size_t)layout.index);
             hash_combine(hash, py_object_hash(layout.py_object));
