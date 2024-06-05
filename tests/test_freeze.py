@@ -1418,7 +1418,7 @@ def test32_allocated_scratch_buffer(t):
         if dr.flag(dr.JitFlag.KernelFreezing):
             with pytest.raises(
                 RuntimeError,
-                match="was created before recording was started, but it was not speciefied as and input variable",
+                match="was created before recording was started, but it was not speciefied as an input variable",
             ):
                 result = model.fn1(x)
             break
@@ -1516,6 +1516,7 @@ def test34_reductions_with_ad(t):
         # Unfortunately, as long as we don't support creating opaque values
         # within a frozen kernel, we can't use `dr.mean()` directly.
         loss = dr.sum(result) / width_opaque
+        # loss = dr.mean(result)
         dr.backward(loss)
 
         print(f"{dr.grad(intermediate).index=}")
@@ -1528,7 +1529,7 @@ def test34_reductions_with_ad(t):
         loss = dr.prod(x)
         dr.backward_from(loss)
 
-    for i in range(1):
+    for i in range(3):
         x = dr.linspace(Float, 0, 1, n + i) + dr.opaque(Float, i)
         result, intermediate = sum_with_ad(x, dr.opaque(Float, dr.width(x)))
         assert dr.width(result) == n + i
@@ -1554,3 +1555,43 @@ def test34_reductions_with_ad(t):
         with dr.suspend_grad():
             expected_grad = dr.prod(x) / x
         assert dr.allclose(dr.grad(x), expected_grad)
+
+
+# @pytest.test_arrays("float32, jit, shape=(*)")
+# def test35_mean(t):
+#     def func(x):
+#         return dr.mean(x)
+#
+#     frozen_func = dr.freeze(func)
+#
+#     n = 10
+#
+#     for i in range(3):
+#         x = dr.linspace(t, 0, 1, n + i) + dr.opaque(t, i)
+#
+#         result = frozen_func(x)
+#         assert dr.allclose(result, func(x))
+
+
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test36_size_aliasing(t):
+    def func(x, y):
+        return x + 1, y + 2
+
+    frozen_func = dr.freeze(func)
+
+    n = 3
+
+    for i in range(3):
+        x = dr.linspace(t, 0, 1, n) + dr.opaque(t, i)
+        y = dr.linspace(t, 0, 1, n + i) + dr.opaque(t, i)
+
+        result = frozen_func(x, y)
+
+        assert dr.allclose(result, func(x, y))
+
+    """
+    We should have two recordings, one for which the experssions x+1 and y+1 are compiled into the same kernel,
+    because x and y have the same size and one where they are compiled seperately because their sizes are different.
+    """
+    assert frozen_func.n_recordings == 2
