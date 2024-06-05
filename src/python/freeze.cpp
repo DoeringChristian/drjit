@@ -51,6 +51,10 @@ struct Layout {
     /// The index in the flat_variables array of this variable.
     /// This can be used to determine aliasing.
     uint32_t index = 0;
+    /// We have to track the condition, where two variables have the same size
+    /// during recording but don't when replaying.
+    /// Therefore we de-duplicate the size.
+    uint32_t size_index = 0;
 
     /// If a non drjit type is passed as function arguments or result, we simply
     /// cache it here.
@@ -93,6 +97,10 @@ struct Layout {
             jit_log(LogLevel::Warn, "    index");
             return false;
         }
+        if (this->size_index != rhs.size_index) {
+            jit_log(LogLevel::Warn, "    size_index");
+            return false;
+        }
         if (this->literal != rhs.literal) {
             jit_log(LogLevel::Warn, "    literal");
             return false;
@@ -114,7 +122,14 @@ struct FlatVariables {
     /// The flattened variable indices of the input/output to a frozen function
     std::vector<uint32_t> variables;
     /// Mapping from drjit variable index to index in flat variables
-    tsl::robin_map<uint32_t, uint32_t> index_to_flat;
+    tsl::robin_map<uint32_t, uint32_t> index_to_slot;
+    
+    /// We have to track the condition, where two variables have the same size
+    /// during recording but don't when replaying.
+    /// Therefore we de-duplicate the size.
+    std::vector<uint32_t> sizes;
+    tsl::robin_map<uint32_t, uint32_t> size_to_slot;
+    
     /// This saves information about the type, size and fields of pytree
     /// objects. The information is stored in DFS order.
     std::vector<Layout> layout;
@@ -131,7 +146,7 @@ struct FlatVariables {
     void clear() {
         this->layout_index = 0;
         this->variables.clear();
-        this->index_to_flat.clear();
+        this->index_to_slot.clear();
         this->layout.clear();
         this->backend = JitBackend::None;
     }
@@ -147,12 +162,12 @@ struct FlatVariables {
      * to the same flat variable index.
      */
     uint32_t add_variable_index(uint32_t variable_index) {
-        auto it = this->index_to_flat.find(variable_index);
+        auto it = this->index_to_slot.find(variable_index);
 
-        if (it == this->index_to_flat.end()) {
-            uint32_t flat_index = this->variables.size();
+        if (it == this->index_to_slot.end()) {
+            uint32_t slot = this->variables.size();
             jit_log(LogLevel::Info, "    aliasing var(%u) -> flat_var(%u)",
-                    variable_index, flat_index);
+                    variable_index, slot);
 
             // NOTE: an alternative to borrowing here would be to make `refcount
             // > 1` part of the layout, which would allow us to selectively
@@ -161,15 +176,37 @@ struct FlatVariables {
                 jit_var_inc_ref(variable_index);
             this->variables.push_back(variable_index);
 
-            this->index_to_flat.insert({variable_index, flat_index});
-            return flat_index;
+            this->index_to_slot.insert({variable_index, slot});
+            return slot;
         } else {
-            uint32_t flat_index = it.value();
+            uint32_t slot = it.value();
             jit_log(
                 LogLevel::Info,
-                "collect(): Found aliasing condition var(%u) -> flat_var(%u)",
-                variable_index, flat_index);
-            return flat_index;
+                "collect(): Found aliasing condition var(%u) -> slot(%u)",
+                variable_index, slot);
+            return slot;
+        }
+    }
+    
+    uint32_t add_size(uint32_t size) {
+        auto it = this->size_to_slot.find(size);
+
+        if (it == this->size_to_slot.end()) {
+            uint32_t slot = this->sizes.size();
+            jit_log(LogLevel::Info, "    aliasing size %u -> slot %u",
+                    size, slot);
+
+            this->sizes.push_back(size);
+
+            this->size_to_slot.insert({size, slot});
+            return slot;
+        } else {
+            uint32_t slot = it.value();
+            jit_log(
+                LogLevel::Info,
+                "collect(): Found aliasing condition size %u -> slot %u",
+                size, slot);
+            return slot;
         }
     }
 
@@ -207,6 +244,7 @@ struct FlatVariables {
         layout.type = nb::borrow<nb::type_object>(tp);
         layout.vs = vs;
         layout.vt = jit_var_type(index);
+        layout.size_index = this->add_size(jit_var_size(index));
 
         if (vs == VarState::Literal) {
             jit_log(LogLevel::Info, "    vs=Literal");
@@ -1319,6 +1357,9 @@ struct RecordingKey {
             if (lhs_layout.index != rhs_layout.index)
                 jit_log(LogLevel::Debug, "    index: %u != %u",
                         lhs_layout.index, rhs_layout.index);
+            if (lhs_layout.size_index != rhs_layout.size_index)
+                jit_log(LogLevel::Debug, "    size_index: %u != %u",
+                        lhs_layout.size_index, rhs_layout.size_index);
             if (!(lhs_layout.py_object.equal(rhs_layout.py_object)))
                 jit_log(LogLevel::Debug, "    py_object: %s != %s",
                         nb::str(lhs_layout.py_object).c_str(),
@@ -1365,6 +1406,7 @@ struct RecordingKeyHasher {
             hash_combine(hash, (size_t)layout.flags);
             hash_combine(hash, (size_t)layout.literal);
             hash_combine(hash, (size_t)layout.index);
+            hash_combine(hash, (size_t)layout.size_index);
             hash_combine(hash, py_object_hash(layout.py_object));
         }
 
@@ -1442,7 +1484,7 @@ struct FrozenFunction {
                 in_variables.drop_variables();
                 jit_record_abort(in_variables.backend);
 
-                nb::chain_error(PyExc_RuntimeError, "%s", e.what());
+                nb::chain_error(PyExc_RuntimeError, "freeze(): %s", e.what());
                 nb::raise_python_error();
             };
 
