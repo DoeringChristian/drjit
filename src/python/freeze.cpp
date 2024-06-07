@@ -1086,7 +1086,7 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
     }
 }
 
-static void deep_make_opaque(nb::handle h) {
+static void deep_make_opaque(nb::handle h, bool eval = true) {
     jit_log(LogLevel::Debug, "make_opaque");
 
     struct ScheduleForceCallback : TransformInPlaceCallback {
@@ -1131,13 +1131,13 @@ static void deep_make_opaque(nb::handle h) {
     ScheduleForceCallback op;
     transform_in_place(h, op);
 
-    if (op.result) {
+    if (op.result && eval) {
         nb::gil_scoped_release guard;
         jit_eval();
     }
 }
 
-static void deep_eval(nb::handle h) {
+static void deep_eval(nb::handle h, bool eval = true) {
     jit_log(LogLevel::Debug, "deep_schedule");
 
     struct ScheduleCallback : TransformInPlaceCallback {
@@ -1172,7 +1172,7 @@ static void deep_eval(nb::handle h) {
     ScheduleCallback op;
     transform_in_place(h, op);
 
-    if (op.result) {
+    if (op.result && eval) {
         nb::gil_scoped_release guard;
         jit_eval();
     }
@@ -1219,8 +1219,12 @@ struct FunctionRecording {
         output.append(input);
 
         // Eval the input and output and it's gradients.
-        deep_make_opaque(input);
-        deep_eval(result);
+        deep_make_opaque(input, false);
+        deep_eval(result, false);
+        {
+            nb::gil_scoped_release guard;
+            jit_eval();
+        }
 
         jit_log(LogLevel::Info, "Traversing output");
 
@@ -1449,7 +1453,6 @@ struct FrozenFunction {
         // Evaluate input variables, forcing evaluation of undefined variables
         // NOTE: not sure, why both are necessary
         deep_make_opaque(input);
-        eval(input);
 
         // Traverse input variables
         jit_log(LogLevel::Debug, "freeze(): Traversing input.");
