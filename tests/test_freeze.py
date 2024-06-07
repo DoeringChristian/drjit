@@ -1595,3 +1595,33 @@ def test36_size_aliasing(t):
     because x and y have the same size and one where they are compiled seperately because their sizes are different.
     """
     assert frozen_func.n_recordings == 2
+
+
+@pytest.test_arrays("float32, jit, -is_diff, shape=(*)")
+def test37_pointer_aliasing(t):
+    """
+    Dr.Jit employs a memory cache, which means that two variables
+    get allocated the same memory region, if one is destroyed
+    before the other is created.
+    Since we track variables using their pointers in the `RecordThreadState`,
+    we have to update the `ptr_to_slot` mapping for new variables.
+    """
+
+    n = 4
+
+    def func(x):
+        y = x + 1
+        dr.make_opaque(y)
+        for i in range(3):
+            y = y + 1
+            dr.make_opaque(y)
+        return y
+
+    for i in range(10):
+        frozen_func = dr.freeze(func)
+
+        x = dr.linspace(t, 0, 1, n) + dr.opaque(t, i)
+        assert dr.allclose(frozen_func(x), func(x))
+
+        x = dr.linspace(t, 0, 1, n) + dr.opaque(t, i)
+        assert dr.allclose(frozen_func(x), func(x))
