@@ -123,13 +123,13 @@ struct FlatVariables {
     std::vector<uint32_t> variables;
     /// Mapping from drjit variable index to index in flat variables
     tsl::robin_map<uint32_t, uint32_t> index_to_slot;
-    
+
     /// We have to track the condition, where two variables have the same size
     /// during recording but don't when replaying.
     /// Therefore we de-duplicate the size.
     std::vector<uint32_t> sizes;
     tsl::robin_map<uint32_t, uint32_t> size_to_slot;
-    
+
     /// This saves information about the type, size and fields of pytree
     /// objects. The information is stored in DFS order.
     std::vector<Layout> layout;
@@ -180,21 +180,20 @@ struct FlatVariables {
             return slot;
         } else {
             uint32_t slot = it.value();
-            jit_log(
-                LogLevel::Info,
-                "collect(): Found aliasing condition var(%u) -> slot(%u)",
-                variable_index, slot);
+            jit_log(LogLevel::Info,
+                    "collect(): Found aliasing condition var(%u) -> slot(%u)",
+                    variable_index, slot);
             return slot;
         }
     }
-    
+
     uint32_t add_size(uint32_t size) {
         auto it = this->size_to_slot.find(size);
 
         if (it == this->size_to_slot.end()) {
             uint32_t slot = this->sizes.size();
-            jit_log(LogLevel::Info, "    aliasing size %u -> slot %u",
-                    size, slot);
+            jit_log(LogLevel::Info, "    aliasing size %u -> slot %u", size,
+                    slot);
 
             this->sizes.push_back(size);
 
@@ -202,10 +201,9 @@ struct FlatVariables {
             return slot;
         } else {
             uint32_t slot = it.value();
-            jit_log(
-                LogLevel::Info,
-                "collect(): Found aliasing condition size %u -> slot %u",
-                size, slot);
+            jit_log(LogLevel::Info,
+                    "collect(): Found aliasing condition size %u -> slot %u",
+                    size, slot);
             return slot;
         }
     }
@@ -843,8 +841,6 @@ struct FlatVariables {
         nb::handle tp = dst.type();
         Layout &layout = this->layout[layout_index++];
 
-        nb::print(tp);
-
         if (!layout.type.equal(tp))
             nb::raise("Type missmatch! Type of original object %s does not "
                       "match type of new object %s.",
@@ -1224,7 +1220,7 @@ struct FunctionRecording {
 
         // Eval the input and output and it's gradients.
         deep_make_opaque(input);
-        deep_eval(output);
+        deep_eval(result);
 
         jit_log(LogLevel::Info, "Traversing output");
 
