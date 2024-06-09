@@ -1,9 +1,10 @@
 #include "freeze.h"
+#include "autodiff.h"
 #include "base.h"
 #include "common.h"
 #include "drjit-core/jit.h"
+#include "drjit/array_router.h"
 #include "drjit/extra.h"
-#include "eval.h"
 #include "listobject.h"
 #include "nanobind/intrusive/counter.h"
 #include "nanobind/nanobind.h"
@@ -417,6 +418,9 @@ struct FlatVariables {
     void traverse(nb::handle h) {
         nb::handle tp = h.type();
 
+        // nb::print(tp);
+        // nb::print("{");
+
         try {
             if (is_drjit_type(tp)) {
                 const ArraySupplement &s = supp(tp);
@@ -549,6 +553,8 @@ struct FlatVariables {
                             nb::type_name(tp).ptr(), e.what());
             nb::raise_python_error();
         }
+
+        // nb::print("}");
     }
 
     /**
@@ -578,6 +584,7 @@ struct FlatVariables {
      * It returns a owning reference.
      */
     uint64_t construct_ad_index(const Layout &layout) {
+        jit_log(LogLevel::Debug, "construct(): flat var");
         if ((layout.flags & (uint32_t)LayoutFlag::GradEnabled) != 0) {
             Layout &val_layout = this->layout[layout_index++];
             uint32_t val = construct_jit_index(val_layout);
@@ -593,6 +600,8 @@ struct FlatVariables {
             }
 
             uint64_t ad_var = ad_var_new(val);
+
+            jit_log(LogLevel::Debug, " -> ad_var r%zu", ad_var);
             jit_var_dec_ref(val);
 
             ad_clear_grad(ad_var);
@@ -786,6 +795,9 @@ struct FlatVariables {
         uint64_t index = construct_ad_index(layout);
 
         s.reset_index(index, inst_ptr(dst));
+        jit_log(LogLevel::Debug,
+                "index=%zu, grad_enabled=%u, ad_grad_enabled=%u", index,
+                grad_enabled(dst), ad_grad_enabled(index));
 
         ad_var_dec_ref(index);
     }
@@ -840,6 +852,9 @@ struct FlatVariables {
     void assign(nb::handle dst) {
         nb::handle tp = dst.type();
         Layout &layout = this->layout[layout_index++];
+
+        // nb::print(tp);
+        // nb::print("{");
 
         if (!layout.type.equal(tp))
             nb::raise("Type missmatch! Type of original object %s does not "
@@ -927,6 +942,8 @@ struct FlatVariables {
                             nb::type_name(tp).ptr(), e.what());
             nb::raise_python_error();
         }
+
+        // nb::print("}");
     }
 
     void log_layout() const {
@@ -1120,7 +1137,7 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
                     result = true;
             }
 
-            jit_log(LogLevel::Debug, "    scheduled %zu -> %zu", index,
+            jit_log(LogLevel::Debug, "    scheduled 0x%llx -> 0x%llx", index,
                     new_index);
             jit_log(LogLevel::Debug, "    state=%u", jit_var_state(new_index));
 
@@ -1219,20 +1236,29 @@ struct FunctionRecording {
         output.append(input);
 
         // Eval the input and output and it's gradients.
-        deep_make_opaque(input, false);
-        deep_eval(result, false);
+        jit_log(LogLevel::Debug, "Evaluating output:");
         {
-            nb::gil_scoped_release guard;
-            jit_eval();
-        }
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+            deep_make_opaque(input, false);
+            deep_eval(result, false);
+            {
+                nb::gil_scoped_release guard;
+                jit_eval();
+            }
 
-        jit_log(LogLevel::Info, "Traversing output");
+            ad_scope_leave(false);
+        }
 
         // Pause recording before traversal as to not accedentally record
         // unwanted operations.
         jit_record_pause(backend);
 
-        out_variables.traverse(output);
+        jit_log(LogLevel::Info, "Traversing output");
+        {
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+            out_variables.traverse(output);
+            ad_scope_leave(false);
+        }
 
         if ((out_variables.variables.size() > 0 &&
              in_variables.variables.size() > 0) &&
@@ -1450,14 +1476,20 @@ struct FrozenFunction {
         input.append(args);
         input.append(kwargs);
 
-        // Evaluate input variables, forcing evaluation of undefined variables
-        // NOTE: not sure, why both are necessary
-        deep_make_opaque(input);
-
-        // Traverse input variables
-        jit_log(LogLevel::Debug, "freeze(): Traversing input.");
         FlatVariables in_variables(true);
-        in_variables.traverse(input);
+        {
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+
+            // Evaluate input variables, forcing evaluation of undefined
+            // variables NOTE: not sure, why both are necessary
+            deep_make_opaque(input);
+
+            // Traverse input variables
+            jit_log(LogLevel::Debug, "freeze(): Traversing input.");
+            in_variables.traverse(input);
+
+            ad_scope_leave(true);
+        }
 
         raise_if(in_variables.backend == JitBackend::None,
                  "freeze(): Cannot infer backend without providing input "
@@ -1499,7 +1531,12 @@ struct FrozenFunction {
 
             FunctionRecording *recording = it.value().get();
 
-            auto result = recording->replay(in_variables, input);
+            nb::object result;
+            {
+                ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+                result = recording->replay(in_variables, input);
+                ad_scope_leave(true);
+            }
 
             return result;
         }
