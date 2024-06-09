@@ -1625,3 +1625,144 @@ def test37_pointer_aliasing(t):
 
         x = dr.linspace(t, 0, 1, n) + dr.opaque(t, i)
         assert dr.allclose(frozen_func(x), func(x))
+
+
+@pytest.test_arrays("float32, jit, is_diff, shape=(*)")
+def test38_simple_ad_fully_inside(t):
+    mod = sys.modules[t.__module__]
+    Float = mod.Float
+
+    def my_kernel(x):
+        dr.enable_grad(x)
+
+        result = x * x
+        dr.backward(result)
+
+        return result
+
+    for start_enabled in (True, False):
+        # Re-freeze
+        my_kernel_frozen = dr.freeze(my_kernel)
+
+        for i in range(3):
+            print(f"------------------------------ {i=}, {start_enabled=}")
+            x = Float([1.0, 2.0, 3.0]) + dr.opaque(Float, i)
+            if start_enabled:
+                dr.enable_grad(x)
+
+            y = my_kernel_frozen(x)
+            grad_x = dr.grad(x)
+            grad_y = dr.grad(y)
+            dr.schedule(y, grad_x, grad_y)
+            print(f"Input was: {x=}")
+            print(f"Outputs were: {y=}, {grad_y=}, {grad_x=}")
+            assert dr.allclose(y, dr.square(x))
+            assert dr.allclose(grad_y, 0)
+            assert dr.allclose(grad_x, 2 * x)
+
+            # Status of grad_enabled should be restored (side-effect of the function),
+            #  even if it wasn't enabled at first
+            assert dr.grad_enabled(x)
+            print("------------------------------")
+
+
+@pytest.mark.parametrize("set_some_literal_grad", (False,))
+@pytest.mark.parametrize("inputs_end_enabled", (True, False))
+@pytest.mark.parametrize("inputs_start_enabled", (True,))
+@pytest.mark.parametrize("params_end_enabled", (False, False))
+@pytest.mark.parametrize("params_start_enabled", (True, ))
+@pytest.mark.parametrize("freeze", (True,))
+@pytest.test_arrays("float32, jit, is_diff, shape=(*)")
+def test39_suspend_resume(
+    t,
+    params_start_enabled,
+    params_end_enabled,
+    inputs_start_enabled,
+    inputs_end_enabled,
+    set_some_literal_grad,
+    freeze,
+):
+
+    mod = sys.modules[t.__module__]
+    Float = mod.Float32
+    UInt32 = mod.UInt32
+    log_level = dr.log_level()
+    # dr.set_log_level(dr.LogLevel.Debug)
+
+    # TODO: remove this
+    # dr.set_flag(dr.JitFlag.KernelFreezing, False)
+
+    class MyModel:
+        DRJIT_STRUCT = {"params": Float}
+
+        def __init__(self, params):
+            self.params = params
+            self.frozen_eval = dr.freeze(type(self).eval) if freeze else type(self).eval
+
+        def eval(
+            self,
+            x: Float,
+            params_end_enabled: bool,
+            inputs_end_enabled: bool,
+            set_some_literal_grad: bool,
+        ):
+            idx = dr.arange(UInt32, dr.width(x)) % dr.width(self.params)
+            latents = dr.gather(Float, self.params, idx)
+            result = x * latents
+
+            with dr.resume_grad():
+                dr.set_grad_enabled(self.params, params_end_enabled)
+                dr.set_grad_enabled(x, inputs_end_enabled)
+                if set_some_literal_grad:
+                    # If grads are not enabled, this will get ignored, which is fine
+                    dr.set_grad(x, Float(6.66))
+                print(f"resumed: {dr.grad_enabled(x)=}")
+
+            print(f"suspended: {dr.grad_enabled(x)=}")
+            return result
+
+    model = MyModel(params=Float([1, 2, 3, 4, 5]))
+
+    for i in range(3):
+        print(f"------------------------------ {i=}")
+        # Inputs of different widths
+        x = Float([0.1, 0.2, 0.3, 0.4, 0.5, 0.6] * (i + 1)) + dr.opaque(Float, i)
+
+        dr.set_grad_enabled(model.params, params_start_enabled)
+        dr.set_grad_enabled(x, inputs_start_enabled)
+
+        # print(f'Before: {model.params.index=}, {dr.grad(model.params).index=}, {dr.grad(model.params).is_literal_()}')
+
+        dr.eval(x, dr.grad(x))
+        print(f"{dr.grad_enabled(x)=}, {x.index=}, {x.index_ad=}")
+
+        with dr.suspend_grad():
+            with dr.resume_grad():
+                print(f"{dr.grad_enabled(x)=}, {x.index=}, {x.index_ad=}")
+            result = model.frozen_eval(
+                model, x, params_end_enabled, inputs_end_enabled, set_some_literal_grad
+            )
+
+        # dr.eval(result, model.params, dr.grad(model.params))
+        print(f"After: {model.params.index=}, {dr.grad(model.params).index=} ")
+        assert not dr.grad_enabled(result)
+        assert dr.grad_enabled(model.params) == params_end_enabled
+        assert dr.grad_enabled(x) == inputs_end_enabled
+
+        # The frozen function should restore the right width, even for a zero-valued literal.
+        # The default gradients are a zero-valued literal array
+        # with a width equal to the array's width
+        grads = dr.grad(model.params)
+        assert dr.width(grads) == dr.width(model.params)
+        assert dr.all(grads == 0)
+
+        grads = dr.grad(x)
+        assert dr.width(grads) == dr.width(x)
+        if inputs_end_enabled and set_some_literal_grad:
+            assert dr.all(grads == 6.66)
+        else:
+            assert dr.all(grads == 0)
+
+        assert model.frozen_eval.n_recordings == 1
+
+    dr.set_log_level(log_level)
