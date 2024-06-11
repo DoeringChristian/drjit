@@ -1253,6 +1253,9 @@ struct FunctionRecording {
         // unwanted operations.
         jit_record_pause(backend);
 
+        // TODO: validate, that gradients wheren't enabled for inputs inside the
+        // frozen function.
+
         jit_log(LogLevel::Info, "Traversing output");
         {
             ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
