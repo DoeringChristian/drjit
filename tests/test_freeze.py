@@ -1670,7 +1670,7 @@ def test38_simple_ad_fully_inside(t):
 @pytest.mark.parametrize("inputs_end_enabled", (True, False))
 @pytest.mark.parametrize("inputs_start_enabled", (True,))
 @pytest.mark.parametrize("params_end_enabled", (False, False))
-@pytest.mark.parametrize("params_start_enabled", (True, ))
+@pytest.mark.parametrize("params_start_enabled", (True,))
 @pytest.mark.parametrize("freeze", (True,))
 @pytest.test_arrays("float32, jit, is_diff, shape=(*)")
 def test39_suspend_resume(
@@ -1766,3 +1766,121 @@ def test39_suspend_resume(
         assert model.frozen_eval.n_recordings == 1
 
     dr.set_log_level(log_level)
+
+
+@pytest.test_arrays("float32, jit, cuda, is_diff, shape=(*)")
+@pytest.mark.parametrize("freeze", (True,))
+@pytest.mark.parametrize("change_params_width", (True, False))
+def test40_with_grad_scatter(t, freeze: bool, change_params_width):
+    mod = sys.modules[t.__module__]
+    Float = mod.Float32
+    UInt32 = mod.UInt32
+    log_level = dr.log_level()
+    # dr.set_log_level(dr.LogLevel.Debug)
+    # dr.set_flag(dr.JitFlag.KernelFreezing, False)
+
+    class Model:
+        DRJIT_STRUCT = {"params": Float}
+
+        def __init__(self, n):
+            self.params = Float(list(range(1, n + 1)))
+            assert dr.width(self.params) == n
+            dr.enable_grad(self.params)
+
+        def __call__(self):
+            # Cheeky workaround for the frozen kernel signature checking
+            pass
+
+    def my_kernel(model, x, opaque_params_width):
+        idx = dr.arange(UInt32, dr.width(x)) % opaque_params_width
+
+        with dr.resume_grad():
+            latents = dr.gather(Float, model.params, idx)
+            contrib = x * latents
+            dr.backward_from(contrib)
+
+            return dr.detach(contrib)
+
+    model = Model(5)
+    my_kernel_frozen = dr.freeze(my_kernel) if freeze else my_kernel
+
+    for i in range(6):
+        print(f"------------------------------ {i=}")
+        # Different width at each iteration
+        x = Float([1.0, 2.0, 3.0] * (i + 1)) + dr.opaque(Float, i)
+
+        # The frozen kernel should also support the params (and therefore its gradient buffer)
+        # changing width without issues.
+        if change_params_width and (i == 3):
+            model = Model(10)
+        # Reset gradients
+        dr.set_grad(model.params, 0)
+        assert dr.grad_enabled(model.params)
+
+        with dr.suspend_grad():
+            y = my_kernel_frozen(model, x, dr.opaque(UInt32, dr.width(model.params)))
+        assert not dr.grad_enabled(x)
+        assert not dr.grad_enabled(y)
+        assert dr.grad_enabled(model.params)
+
+        grad_x = dr.grad(x)
+        grad_y = dr.grad(y)
+        grad_p = dr.grad(model.params)
+        print(f"Input was: {x=}")
+        print(f"Outputs were: {y=}, {grad_y=}, {grad_x=}, {grad_p=}")
+        # assert dr.allclose(y, dr.sqr(x))
+
+        # Expected grads
+        assert dr.allclose(grad_y, 0)
+        assert dr.allclose(grad_x, 0)
+        grad_p_expected = dr.zeros(Float, dr.width(model.params))
+        idx = dr.arange(UInt32, dr.width(x)) % dr.width(model.params)
+        dr.scatter_reduce(dr.ReduceOp.Add, grad_p_expected, x, idx)
+        assert dr.allclose(grad_p, grad_p_expected)
+        print(f"------------------------------")
+
+    dr.set_log_level(log_level)
+
+
+@pytest.test_arrays("float32, jit, is_diff, shape=(*)")
+def test41_tutorial_example(t):
+    mod = sys.modules[t.__module__]
+    Float = mod.Float32
+    UInt32 = mod.UInt32
+
+    @dr.freeze
+    def frozen_eval(inputs, idx, params, target_value, grad_factor):
+        intermediate = dr.gather(Float, params, idx)
+        result = 0.5 * dr.square(intermediate) * inputs
+
+        # Since reductions are not supported yet, we cannot compute a single
+        # loss value here. It's not really a problem though, since DrJit can
+        # backpropagate starting from arrays of any widths.
+        loss_per_entry = dr.square(result - target_value) * grad_factor
+
+        # The gradients resulting from backpropagation will be directly accumulated
+        # (via dr.scatter_add()) into the gradient buffer of `params` (= `dr.grad(params)`).
+        dr.backward_from(loss_per_entry)
+
+        # It's fine to return the primal values of `result`, but keep in mind that they will
+        # not be differentiable w.r.t. `params`.
+        return dr.detach(result)
+
+    params = Float([1, 2, 3, 4, 5])
+
+    for _ in range(3):
+        dr.disable_grad(params)
+        dr.enable_grad(params)
+        assert dr.all(dr.grad(params) == 0)
+
+        inputs = Float([0.1, 0.2, 0.3])
+        idx = UInt32([1, 2, 3])
+        # Represents the optimizer's loss scale
+        grad_factor = 4096 / dr.opaque(Float, dr.width(inputs))
+
+        result = frozen_eval(
+            inputs, idx, params, target_value=0.5, grad_factor=grad_factor
+        )
+        assert not dr.grad_enabled(result)
+        # Gradients were correctly accumulated to `params`'s gradients.
+        assert not dr.all(dr.grad(params) == 0)
