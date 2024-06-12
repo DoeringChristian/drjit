@@ -9,8 +9,8 @@ Many tensor operations are missing, will you add them?
 ------------------------------------------------------
 
 While Dr.Jit does have a tensors and certain operations that operate on them,
-it is *not* a general array programming framework in the style of NumPy or
-PyTorch. If you try to use it like one, you likely won't have a good time.
+it is *not* a general tensor framework in the style of NumPy or PyTorch. If you
+try to use it like one, you likely won't have a good time.
 
 Fast Dr.Jit programs perform many parallel evaluations of programs built from
 :ref:`flat <flat_arrays>` and :ref:`nested <nested_arrays>` array operations,
@@ -35,3 +35,9 @@ symbolic to evaluated mode. This connection can be further formalized
 using the decorator discussed in the section on :ref:`interoperability
 <interop>`. This isn't a great solution since evaluated mode comes at a
 significant additional cost.
+
+Could you please add a Metal/ROCm/.. backend?
+---------------------------------------------
+
+We may add further backends in the future, but this does not have a high
+priority on our end. External contributions are certainly welcome.

@@ -1,3 +1,5 @@
+.. py:currentmodule:: drjit
+
 .. _what_is_drjit:
 
 What is Dr.Jit?
@@ -30,9 +32,9 @@ created was to provide the foundation of `Mitsuba 3
 renderer). That said, Dr.Jit is a general tool that also supports many other
 kinds of parallel workloads.
 
-This documentation focuses on Python, but Dr.Jit also has a C++ interface. A
-separate :ref:`documentation section <cpp_iface>` explains how to convert
-code between the two languages.
+This documentation centers around the Python interface, but Dr.Jit can also be
+used from C++. A separate :ref:`documentation section <cpp_iface>` explains how
+to convert code between the two languages.
 
 Let's first see how Dr.Jit works in the context of a simple example.
 
@@ -74,12 +76,12 @@ there are fundamental differences between the two:
    does this avoid loading and storing temporaries: it also makes it easy to
    parallelize the program on compute accelerators.
 
-This is just a toy example, but the idea it shows scales: Dr.Jit can trace
+This is just a toy example, but the idea it shows is general. Dr.Jit can trace
 large and complicated programs with side effects, loops, conditionals,
-polymorphic indirection, atomic memory operations, texture fetches,
-hardware-accelerated ray tracing operations, etc. The principle is always the
-same: the system captures what operations are needed to calculate a result,
-postponing them for as long as possible.
+polymorphic indirection, atomic memory operations, texture fetches, ray tracing
+operations, etc. The principle is always the same: the system captures what
+operations are needed to calculate a result, postponing them for as long as
+possible.
 
 Users of `JAX <https://github.com/google/jax>`__ may find this familiar: JAX
 combines tracing with tensor-based optimizations for machine learning
@@ -129,11 +131,11 @@ automatically vectorizes and parallelizes along this added dimension. Basically
 you write code that "looks" like a scalar program, and Dr.Jit will efficiently
 run it many times in parallel. In contrast to tensor-based systems, there is no
 ambiguity about how this parallelization should take place. Because of the
-typed nature of this project, operations like :py:func:`drjit.linspace`
+typed nature of Dr.Jit, operations like :py:func:`drjit.linspace`
 take the desired return type as a mandatory first argument.
 
-Now let's look at how this idea of tracing computation to assemble a parallel
-program works. Conceptually, a line like
+Let's now look at how the idea of *tracing computation* can assemble a parallel
+program. Conceptually, a line like
 
 .. code-block:: python
 
