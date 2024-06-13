@@ -1,5 +1,13 @@
 .. py:currentmodule:: drjit
 
+.. image:: ../ext/drjit-core/resources/drjit-logo-dark.svg
+  :class: only-light
+  :align: center
+
+.. image:: ../ext/drjit-core/resources/drjit-logo-light.svg
+  :class: only-dark
+  :align: center
+
 .. _what_is_drjit:
 
 What is Dr.Jit?
@@ -36,7 +44,14 @@ This documentation centers around the Python interface, but Dr.Jit can also be
 used from C++. A separate :ref:`documentation section <cpp_iface>` explains how
 to convert code between the two languages.
 
-Let's first see how Dr.Jit works in the context of a simple example.
+To install Dr.Jit for Python, run the following shell command:
+
+.. code-block:: bash
+
+   $ pip install drjit
+
+With that taken care of, let's see how Dr.Jit works in the context of a simple
+example.
 
 Capturing computation
 ---------------------
@@ -184,12 +199,23 @@ Metaprogramming
 
 This was an example of more general design pattern called *metaprogramming*: we
 wrote code in Python (called the *metaprogram*) that subsequently generated
-*another* program, and this is what finally ran on the target device. The
+*another* program, and this is what finally ran on the target device.
+
+.. image:: pipeline-light.svg
+  :class: only-light
+  :align: center
+
+.. image:: pipeline-dark.svg
+  :class: only-dark
+  :align: center
+
+Dr.Jit took care of partitioning this generated program into computational
+units (called *kernels*) and piping inputs/outputs to them as needed. The
 program and metaprogram often do the essentially same thing, in which case the
 difference between the two can be subtle.
 
-However, the program and metaprogram could also be quite different. For
-example, let's modify the code so that it asks the user to enter a number on the
+However, the program and metaprogram could also be different. For example,
+let's modify the code so that it asks the user to enter a number on the
 keyboard that is then used to to raise the integrand to a custom power:
 
 .. code-block:: python
@@ -276,8 +302,7 @@ this documentation explain how Dr.Jit generalizes to bigger programs:
 
 ..
    Dr.Jit automatically takes care of memory allocations partitions code into
-   kernel launches, and pipes input/output data to these kernels. You can take
-   control of these steps if needed.
+   kernel launches, and pipes input/output data to these kernels.
    When does Dr.Jit evaluate variables?
    Taking control of variable evaluation
    Type traits
