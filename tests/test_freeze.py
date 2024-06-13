@@ -1884,3 +1884,32 @@ def test41_tutorial_example(t):
         assert not dr.grad_enabled(result)
         # Gradients were correctly accumulated to `params`'s gradients.
         assert not dr.all(dr.grad(params) == 0)
+
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test42_compress(t):
+
+    mod = sys.modules[t.__module__]
+    Float = mod.Float32
+    UInt32 = mod.UInt32
+
+    pkg = get_pkg(t)
+    Sampler = pkg.Sampler
+
+    def func(sampler: Sampler) -> UInt32:
+        indices = dr.compress(sampler.next() < 0.5)
+        return indices
+
+    frozen = dr.freeze(func)
+
+    sampler_func = Sampler(10)
+    sampler_frozen = Sampler(10)
+    for i in range(3):
+        dr.all(frozen(sampler_frozen) == func(sampler_func))
+        
+    sampler_func = Sampler(11)
+    sampler_frozen = Sampler(11)
+    for i in range(3):
+        dr.all(frozen(sampler_frozen) == func(sampler_func))
+
+    assert frozen.n_recordings == 1
