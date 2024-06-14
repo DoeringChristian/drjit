@@ -1768,7 +1768,7 @@ def test39_suspend_resume(
     dr.set_log_level(log_level)
 
 
-@pytest.test_arrays("float32, jit, cuda, is_diff, shape=(*)")
+@pytest.test_arrays("float32, jit, is_diff, shape=(*)")
 @pytest.mark.parametrize("freeze", (True,))
 @pytest.mark.parametrize("change_params_width", (True, False))
 def test40_with_grad_scatter(t, freeze: bool, change_params_width):
@@ -1906,7 +1906,7 @@ def test42_compress(t):
     sampler_frozen = Sampler(10)
     for i in range(3):
         dr.all(frozen(sampler_frozen) == func(sampler_func))
-        
+
     sampler_func = Sampler(11)
     sampler_frozen = Sampler(11)
     for i in range(3):
