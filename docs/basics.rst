@@ -1,11 +1,11 @@
 .. py:currentmodule:: drjit
 
-.. _overview:
+.. _basics:
 
-Overview
-========
+Basics
+======
 
-This document quickly reviews various standard operations. It assumes
+This document briefly reviews various standard operations. It assumes
 the following import declarations
 
 .. code-block:: python
@@ -17,17 +17,17 @@ the following import declarations
 Creating arrays
 ---------------
 
-Recall that Dr.Jit array types are dynamically sized, so :py:class:`Float
-<drjit.auto.Float>` refers to a 1D array of single precision floats:
+Recall that Dr.Jit array types are dynamically sized--for example,
+:py:class:`Float <drjit.auto.Float>` refers to a 1D array of single
+precision variables.
 
 The simplest way to create such an array is to call its constructor with
 a list of explicit values:
-You can create such arrays by explicitly listing the array values.
 
 .. code-block:: python
 
-   x = Float(1, 2, 3, 4)
-   print(x) # [1, 2, 3, 4]
+   a = Float(1, 2, 3, 4)
+   print(a) # [1, 2, 3, 4]
 
 The constructor also accepts ``Sequence`` types (e.g. lists, tuples, NumPy
 arrays, PyTorch tensors, etc.):
@@ -36,40 +36,64 @@ arrays, PyTorch tensors, etc.):
 
    x = Float([1, 2, 3, 4])
 
-Nested array types like :py:class:`Array3f <drjit.auto.Array3f>` wrap several
-instances of their base type (in this case, three :py:class:`Float
-<drjit.auto.Float>` objects) that can be passed to the constructor explicitly,
-or via implicit conversion from constants, lists, etc. Scalar arrays always
-broadcast as needed to be compatible.
+Nested array types store several variable---for example, :py:class:`Array3f
+<drjit.auto.Array3f>` just wraps 3 :py:class:`Float <drjit.auto.Float>` instances.
+They can be passed to the constructor explicitly, or via implicit conversion
+from constants, lists, etc.
 
 .. code-block:: python
 
-   y = Array3f([1, 2], 0, Float(10, 20))
-   print(y)
-   # Prints:
+   a = Array3f([1, 2], 0, Float(10, 20))
+   print(a)
+   # Prints (with 'y' component broadcast to full size)
    # [[1, 0, 10],
    #  [2, 0, 20]]
 
-You can also create default-initialized arrays using helper functions
-that take the desired output type as first argment:
+Various functions can also create default-initialized arrays:
+
+- :py:func:`dr.zeros() <zeros>`: ``[0, 0, ...]``.
+- :py:func:`dr.ones() <ones>`: ``[1, 1, ...]``.
+- :py:func:`dr.full() <full>`: ``[x, x, ...]`` given ``x``.
+- :py:func:`dr.arange() <arange>`: ``[0, 1, 2, ...]``.
+- :py:func:`dr.linspace() <linspace>`: linear interpolation of two endpoints.
+- :py:func:`dr.empty() <empty>`: allocate uninitialized memory.
+
+These always take the desired output type as first argment. You can optionally
+request a given size along the dynamic axis, e.g.:
 
 .. code-block:: python
 
-   x0 = dr.zeros(Array3f)
-   print(x0.shape) # Prints: (3, 1)
+   b = dr.zeros(Array3f)
+   print(b.shape) # Prints: (3, 1)
 
-   x1 = dr.zeros(Array3f, shape=(3, 1000))
-   print(x1.shape) # Prints: (3, 1000)
+   b = dr.zeros(Array3f, shape=(3, 1000))
+   print(b.shape) # Prints: (3, 1000)
 
-Functions to do so include :py:func:`zeros`, :py:func:`empty`, :py:func:`ones`,
-:py:func:`full`, :py:func:`arange`, and :py:func:`linspace`.
 
 Element access
 --------------
 
+Use the default ``array[index]`` syntax to read/write array entries. Nested
+Static 1-4D arrays further expose equivalent ``.x`` / ``.y`` / ``.z`` / ``.w``
+members:
+
 .. code-block:: python
 
-   print(y.shape)
+   a = Array3f(1, 2, 3)
+   a.x += a.z + a[1]
+
+Static 1-4D arrays also support `swizzling
+<https://en.wikipedia.org/wiki/Swizzling_(computer_graphics)>`__, which arbitrarily reorders elements:
+
+.. code-block:: python
+
+   a.xy = a.xx + a.yx
+
+
+
+.. code-block:: python
+
+   print(a.shape)
    (3, 2)
 
 
@@ -104,9 +128,9 @@ The system provides standard transcendental functions.
    :header-rows: 1
 
    * - Ordinary
-     - Inverse ordinary
+     - .. inverse
      - Hyperbolic
-     - Inverse hyperbolic
+     - .. inverse
    * - :py:func:`sin`
      - :py:func:`asin`
      - :py:func:`sinh`

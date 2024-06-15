@@ -91,7 +91,7 @@ there are fundamental differences between the two:
    does this avoid loading and storing temporaries: it also makes it easy to
    parallelize the program on compute accelerators.
 
-This is just a toy example, but the idea it shows is general. Dr.Jit can trace
+This is just a toy example, but the idea it demonstrates is general. Dr.Jit can trace
 large and complicated programs with side effects, loops, conditionals,
 polymorphic indirection, atomic memory operations, texture fetches, ray tracing
 operations, etc. The principle is always the same: the system captures what
@@ -103,13 +103,13 @@ combines tracing with tensor-based optimizations for machine learning
 workloads. JAX is generally amazing, but we find that its optimization often
 tend to backfire in large non-ML workloads, causing `crashes or timeouts
 <https://rgl.s3.eu-central-1.amazonaws.com/media/papers/Jakob2022DrJit.pdf>`__.
-Dr.Jit is tiny in comparison (~20K LOC for the compiler part versus > 1 million
+Dr.Jit is tiny compared to JAX (~20K LOC for the compiler part versus > 1 million
 for the JAX XLA backend) and what it does is simple: it really just captures
 and later replays computation in parallel without trying to be overly clever
 about it.
 
 With this added context, let's revisit the previous example line by line to
-examine the differences. The first one imports the library into an abbreviated
+examine the differences. The first line imports the library into an abbreviated
 ``dr`` namespace containing all functions.
 
 .. code-block:: python
@@ -149,7 +149,7 @@ ambiguity about how this parallelization should take place. Because of the
 typed nature of Dr.Jit, operations like :py:func:`drjit.linspace`
 take the desired return type as a mandatory first argument.
 
-Let's now look at how the idea of *tracing computation* can assemble a parallel
+Let's now look at how *tracing* can be used to assemble a parallel
 program. Conceptually, a line like
 
 .. code-block:: python
@@ -166,8 +166,9 @@ can be thought of as expanding into device code equivalent to:
    for i in range(1000000):
        a[i] = i * (1.0 / 999999.0)
 
-Continuing the Python program simply appends more code to the loop body.
-The next line of the original program was
+However, this device program is still incomplete. Continuing execution in
+Python appends further instructions to the body of the parallel loop. The next
+line of the original program was
 
 .. code-block:: python
 
@@ -283,8 +284,8 @@ Wrap-up
 This concludes our discussion of a first simple example. Subsequent parts of
 this documentation explain how Dr.Jit generalizes to bigger programs:
 
-1. **Overview**: a fast-paced review of the various ways in which Dr.Jit arrays
-   can be created and modified.
+1. :ref:`Basics <basics>`: a fast-paced review of the various ways in which
+   Dr.Jit arrays can be created and modified.
 
 2. **Control flow**: how to trace operations such as ``while`` loops, ``if``
    statements, and polymorphic indirection.

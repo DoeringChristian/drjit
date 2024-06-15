@@ -41,3 +41,11 @@ Could you please add a Metal/ROCm/.. backend?
 
 We may add further backends in the future, but this does not have a high
 priority on our end. External contributions are certainly welcome.
+
+Can I use Dr.Jit to compute higher-order derivatives?
+-----------------------------------------------------
+
+Dr.Jit provides first-order derivatives in forward and reverse mode. Supporting
+higher-order derivatives would require significant architectural changes and is
+therefore outside of the scope of this project. If you are interested in this
+feature and are able to help, then please get in touch.
