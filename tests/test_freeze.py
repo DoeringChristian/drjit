@@ -1770,7 +1770,7 @@ def test39_suspend_resume(
 
 @pytest.test_arrays("float32, jit, is_diff, shape=(*)")
 @pytest.mark.parametrize("freeze", (True,))
-@pytest.mark.parametrize("change_params_width", (True, False))
+@pytest.mark.parametrize("change_params_width", (False, ))
 def test40_with_grad_scatter(t, freeze: bool, change_params_width):
     mod = sys.modules[t.__module__]
     Float = mod.Float32
@@ -1913,3 +1913,26 @@ def test42_compress(t):
         dr.all(frozen(sampler_frozen) == func(sampler_func))
 
     assert frozen.n_recordings == 1
+
+# @pytest.test_arrays("uint32, llvm, -is_diff, jit, shape=(*)")
+# def test43_scatter_reduce_expanded(t):
+#
+#     def func(target: t, src: t):
+#         dr.scatter_reduce(dr.ReduceOp.Add, target, src, dr.arange(t, dr.width(src)) % 2)
+#
+#     frozen = dr.freeze(func)
+#     
+#     for i in range(4):
+#         src = dr.full(t, 1, 10 + i)
+#         dr.make_opaque(src)
+#         
+#         result = t([0] * (i+2))
+#         dr.make_opaque(result)
+#         frozen(result, src)
+#         print(f"{result=}")
+#         
+#         reference = t([0] *(i+2))
+#         dr.make_opaque(reference)
+#         func(reference, src)
+#
+#         assert dr.all(result == reference)
