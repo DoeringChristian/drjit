@@ -4,8 +4,8 @@
 #include "common.h"
 #include "drjit-core/jit.h"
 #include "drjit/array_router.h"
-#include "drjit/traversable_base.h"
 #include "drjit/extra.h"
+#include "drjit/traversable_base.h"
 #include "listobject.h"
 #include "nanobind/intrusive/counter.h"
 #include "nanobind/nanobind.h"
@@ -374,7 +374,7 @@ struct FlatVariables {
             // WARN: very unsafe cast!
             nb::intrusive_base *base = (nb::intrusive_base *)ptr;
             const drjit::TraversableBase *traversable =
-                dynamic_cast<drjit::TraversableBase *>(base);
+                (drjit::TraversableBase *)base;
             nb::handle inst_obj = base->self_py();
 
             if (inst_obj.ptr()) {
@@ -1020,8 +1020,7 @@ static void transform_in_place_dr_class(nb::handle h,
 
         // WARN: very unsafe cast!
         nb::intrusive_base *base = (nb::intrusive_base *)ptr;
-        drjit::TraversableBase *traversable =
-            dynamic_cast<drjit::TraversableBase *>(base);
+        drjit::TraversableBase *traversable = (drjit::TraversableBase *)base;
         nb::handle inst_obj = base->self_py();
 
         if (inst_obj.ptr()) {
