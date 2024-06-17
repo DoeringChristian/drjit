@@ -4,6 +4,7 @@
 #include "common.h"
 #include "drjit-core/jit.h"
 #include "drjit/array_router.h"
+#include "drjit/traversable_base.h"
 #include "drjit/extra.h"
 #include "listobject.h"
 #include "nanobind/intrusive/counter.h"
@@ -1019,13 +1020,14 @@ static void transform_in_place_dr_class(nb::handle h,
 
         // WARN: very unsafe cast!
         nb::intrusive_base *base = (nb::intrusive_base *)ptr;
-        const drjit::TraversableBase *traversable =
+        drjit::TraversableBase *traversable =
             dynamic_cast<drjit::TraversableBase *>(base);
         nb::handle inst_obj = base->self_py();
 
         if (inst_obj.ptr()) {
             transform_in_place(inst_obj, op);
         } else if (traversable) {
+            transform_in_place_traversable(traversable, op);
         } else {
             nb::raise("Could not traverse non-python sub-type!");
         }
