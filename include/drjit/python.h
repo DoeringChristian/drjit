@@ -1054,7 +1054,6 @@ template <typename T, typename... Args> auto& bind_traverse(nanobind::class_<T, 
 
     cls.def("_traverse_1_cb_rw", [](T *self, nb::callable c) {
         Payload payload{ std::move(c) };
-        jit_log(LogLevel::Debug, "pointer %p", &T::traverse_1_cb_rw);
         self->traverse_1_cb_rw((void *) &payload, [](void *p, uint64_t index) {
             return nb::cast<uint64_t>(((Payload *) p)->c(index));
         });
