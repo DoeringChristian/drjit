@@ -426,7 +426,7 @@ struct FlatVariables {
             if (is_drjit_type(tp)) {
                 const ArraySupplement &s = supp(tp);
                 if (s.is_tensor) {
-                    add_dr_var(h);
+                    traverse(nb::steal(s.tensor_array(h.ptr())));
                 } else if (s.ndim != 1) {
                     Py_ssize_t len = s.shape[0];
                     if (len == DRJIT_DYNAMIC)
@@ -969,10 +969,14 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op);
 static void transform_in_place_dr_flat(nb::handle h,
                                        TransformInPlaceCallback &op) {
     nb::handle tp = h.type();
+    nb::print(tp);
 
     const ArraySupplement &s = supp(tp);
 
-    uint64_t index = s.index(inst_ptr(h));
+    auto index_fn = s.index;
+    if(!index_fn)
+        jit_fail("Index function not set!");
+    uint64_t index = index_fn(inst_ptr(h));
     uint64_t new_index = op(index);
     s.reset_index(new_index, inst_ptr(h));
     ad_var_dec_ref(new_index);
@@ -1015,6 +1019,7 @@ static void transform_in_place_dr_class(nb::handle h,
             domain.c_str());
     for (uint32_t id = 0; id < id_bound; ++id) {
         void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
+        jit_log(LogLevel::Debug, "traversing subtype with instance at %p", ptr);
         if (!ptr)
             continue;
 
@@ -1049,7 +1054,8 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
     if (is_drjit_type(tp)) {
         const ArraySupplement &s = supp(tp);
         if (s.is_tensor) {
-            transform_in_place_dr(h, op);
+            nb::object array = nb::steal(s.tensor_array(h.ptr()));
+            transform_in_place(array, op);
         } else if (s.ndim > 1) {
             Py_ssize_t len = s.shape[0];
             if (len == DRJIT_DYNAMIC)
