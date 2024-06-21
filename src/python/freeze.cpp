@@ -974,7 +974,7 @@ static void transform_in_place_dr_flat(nb::handle h,
     const ArraySupplement &s = supp(tp);
 
     auto index_fn = s.index;
-    if(!index_fn)
+    if (!index_fn)
         jit_fail("Index function not set!");
     uint64_t index = index_fn(inst_ptr(h));
     uint64_t new_index = op(index);
@@ -1220,6 +1220,14 @@ struct FunctionRecording {
         this->recording = nullptr;
     }
 
+    void clear(){
+        if (this->recording) {
+            jit_record_destroy(this->recording);
+        }
+        this->recording = nullptr;
+        this->out_variables = FlatVariables(false);
+    }
+
     /*
      * Record a function, given it's python input and flattened input.
      */
@@ -1296,11 +1304,25 @@ struct FunctionRecording {
      *
      * This constructs the output and re-assigns the input.
      */
-    nb::object replay(const FlatVariables &in_variables, nb::list input) {
+    nb::object replay(nb::callable func, nb::list input,
+                      const FlatVariables &in_variables) {
 
         jit_log(LogLevel::Info, "Replaying:");
-        jit_record_replay(recording, in_variables.variables.data(),
-                          out_variables.variables.data());
+        try {
+            jit_record_replay(recording, in_variables.variables.data(),
+                              out_variables.variables.data());
+        } catch (const std::exception &e) {
+            // For now just assume it's a RequireRetraceException
+            this->clear();
+            try{
+                return this->record(func, input, in_variables);
+            }catch(const std::exception &e){
+                jit_record_abort(in_variables.backend);
+
+                nb::chain_error(PyExc_RuntimeError, "freeze(): %s", e.what());
+                nb::raise_python_error();
+            }
+        }
         jit_log(LogLevel::Info, "Replaying done:");
 
         // out_variables.log_layout();
@@ -1537,16 +1559,17 @@ struct FrozenFunction {
             return result;
         } else {
             // Drop references to variables
-            in_variables.drop_variables();
 
             FunctionRecording *recording = it.value().get();
 
             nb::object result;
             {
                 ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
-                result = recording->replay(in_variables, input);
+                result = recording->replay(func, input, in_variables);
                 ad_scope_leave(true);
             }
+            
+            in_variables.drop_variables();
 
             return result;
         }
