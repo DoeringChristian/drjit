@@ -530,6 +530,7 @@ def test19_vcall(t, symbolic):
 @pytest.mark.parametrize("opaque", [True, False])
 @pytest.test_arrays("float32, -is_diff, jit, shape=(*)")
 def test20_vcall_optimize(t, symbolic, optimize, opaque):
+    dr.set_flag(dr.JitFlag.ReuseIndices, False)
     print(f"{symbolic=}")
     print(f"{optimize=}")
     print(f"{opaque=}")
@@ -541,6 +542,8 @@ def test20_vcall_optimize(t, symbolic, optimize, opaque):
 
     B.DRJIT_STRUCT = {"value": t, "opaque": t}
     A.DRJIT_STRUCT = {"value": t, "opaque": t}
+    dr.set_label(A.opaque, "A.opaque")
+    dr.set_label(B.opaque, "B.opaque")
 
     a.value = t(2)
     b.value = t(3)
@@ -551,8 +554,10 @@ def test20_vcall_optimize(t, symbolic, optimize, opaque):
         dr.make_opaque(a.value, b.value)
 
     c = BasePtr(a, a, None, a, a)
+    dr.set_label(c, "c")
 
     x = t(1, 2, 8, 3, 4)
+    dr.set_label(x, "x")
 
     def func(c, xi):
         return c.g(xi)
@@ -572,6 +577,7 @@ def test20_vcall_optimize(t, symbolic, optimize, opaque):
         dr.make_opaque(a.value, b.value)
 
     c = BasePtr(a, a, None, b, b)
+    dr.set_label(c, "c")
 
     with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
         with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
@@ -1927,15 +1933,41 @@ def test43_scatter_reduce_expanded(t):
         src = dr.full(t, 1, 10 + i)
         dr.make_opaque(src)
 
-        result = t([0] * (i+2))
+        result = t([0] * (i + 2))
         dr.make_opaque(result)
         frozen(result, src)
         print(f"{result=}")
 
-        reference = t([0] *(i+2))
+        reference = t([0] * (i + 2))
         dr.make_opaque(reference)
         func(reference, src)
 
         assert dr.all(result == reference)
 
     assert frozen.n_recordings == 1
+
+
+@pytest.test_arrays("uint32, -is_diff, cuda, jit, shape=(*)")
+def test44_capture_problem(t):
+
+    def func(x):
+        dr.eval(x)
+        x = t(1, 0, 0)
+        dr.make_opaque(x)
+        x += 1
+        dr.eval(x)
+        # x = t(0, 1, 0)
+        # dr.make_opaque(x)
+        # x += 1
+        # dr.eval(x)
+        x = t(1, 2, 3)
+        dr.make_opaque(x)
+        x += 1
+        dr.eval(x)
+        return x
+
+    frozen = dr.freeze(func)
+
+    for i in range(3):
+        x = t(0, 0, 0)
+        assert dr.all(frozen(x) == func(x))
