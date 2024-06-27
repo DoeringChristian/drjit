@@ -11,6 +11,7 @@
 #include "nanobind/nanobind.h"
 #include "object.h"
 #include "pyerrors.h"
+#include "shape.h"
 #include "tupleobject.h"
 #include <tsl/robin_map.h>
 #include <vector>
@@ -426,7 +427,15 @@ struct FlatVariables {
             if (is_drjit_type(tp)) {
                 const ArraySupplement &s = supp(tp);
                 if (s.is_tensor) {
-                    traverse(nb::steal(s.tensor_array(h.ptr())));
+                    nb::handle array = s.tensor_array(h.ptr());
+
+                    Layout layout;
+                    layout.type = nb::borrow<nb::type_object>(tp);
+                    layout.py_object = shape(h);
+                    layout.num = width(array);
+                    this->layout.push_back(layout);
+
+                    traverse(nb::steal(array));
                 } else if (s.ndim != 1) {
                     Py_ssize_t len = s.shape[0];
                     if (len == DRJIT_DYNAMIC)
@@ -584,8 +593,9 @@ struct FlatVariables {
      *
      * It returns a owning reference.
      */
-    uint64_t construct_ad_index(const Layout &layout) {
+    uint64_t construct_ad_index(const Layout &layout, uint32_t shrink = 0) {
         jit_log(LogLevel::Debug, "construct(): flat var");
+        uint64_t index;
         if ((layout.flags & (uint32_t)LayoutFlag::GradEnabled) != 0) {
             Layout &val_layout = this->layout[layout_index++];
             uint32_t val = construct_jit_index(val_layout);
@@ -600,24 +610,26 @@ struct FlatVariables {
                 grad = new_grad;
             }
 
-            uint64_t ad_var = ad_var_new(val);
+            index = ad_var_new(val);
 
-            jit_log(LogLevel::Debug, " -> ad_var r%zu", ad_var);
+            jit_log(LogLevel::Debug, " -> ad_var r%zu", index);
             jit_var_dec_ref(val);
 
-            ad_clear_grad(ad_var);
-            ad_accum_grad(ad_var, grad);
+            ad_clear_grad(index);
+            ad_accum_grad(index, grad);
             jit_var_dec_ref(grad);
-
-            return ad_var;
-
         } else {
-            return construct_jit_index(layout);
+            index = construct_jit_index(layout);
         }
+
+        if (shrink > 0)
+            index = ad_var_shrink(index, shrink);
+        return index;
     }
 
-    nb::object construct_flat_dr_var(const Layout &layout) {
-        uint64_t index = construct_ad_index(layout);
+    nb::object construct_flat_dr_var(const Layout &layout,
+                                     uint32_t shrink = 0) {
+        uint64_t index = construct_ad_index(layout, shrink);
 
         auto result = nb::inst_alloc_zero(layout.type);
         const ArraySupplement &s = supp(result.type());
@@ -667,13 +679,13 @@ struct FlatVariables {
         return result;
     }
 
-    nb::object construct_dr_var(const Layout &layout) {
+    nb::object construct_dr_var(const Layout &layout, uint32_t shrink = 0) {
         const ArraySupplement &s = supp(layout.type);
 
         if (s.is_class) {
             return construct_dr_class_var(layout);
         } else {
-            return construct_flat_dr_var(layout);
+            return construct_flat_dr_var(layout, shrink);
         }
     }
 
@@ -694,9 +706,11 @@ struct FlatVariables {
         }
         if (is_drjit_type(layout.type)) {
             const ArraySupplement &s = supp(layout.type);
-
             if (s.is_tensor) {
-                return construct_dr_var(layout);
+                const Layout &array_layout = this->layout[layout_index++];
+                nb::object array = construct_dr_var(array_layout, layout.num);
+
+                return layout.type(array, layout.py_object);
             } else if (s.ndim != 1) {
                 auto result = nb::inst_alloc_zero(layout.type);
                 dr::ArrayBase *p = inst_ptr(result);
@@ -1220,7 +1234,7 @@ struct FunctionRecording {
         this->recording = nullptr;
     }
 
-    void clear(){
+    void clear() {
         if (this->recording) {
             jit_record_destroy(this->recording);
         }
@@ -1314,9 +1328,9 @@ struct FunctionRecording {
         } catch (const std::exception &e) {
             // For now just assume it's a RequireRetraceException
             this->clear();
-            try{
+            try {
                 return this->record(func, input, in_variables);
-            }catch(const std::exception &e){
+            } catch (const std::exception &e) {
                 jit_record_abort(in_variables.backend);
 
                 nb::chain_error(PyExc_RuntimeError, "freeze(): %s", e.what());
@@ -1372,15 +1386,14 @@ struct RecordingKey {
         return this->layout == rhs.layout && this->flags == rhs.flags;
     }
 
-    void log_diff(const RecordingKey *rhs) const {
-        jit_log(LogLevel::Debug, "Key difference:");
+    void log_diff(const RecordingKey *rhs, LogLevel log_level) const {
+        jit_log(log_level, "Key difference:");
         if (this->flags != rhs->flags)
-            jit_log(LogLevel::Debug, "    flags: %u != %u", this->flags,
-                    rhs->flags);
+            jit_log(log_level, "    flags: %u != %u", this->flags, rhs->flags);
 
         if (this->layout.size() != rhs->layout.size()) {
-            jit_log(LogLevel::Debug, "    n_layout: %u != %u",
-                    this->layout.size(), rhs->layout.size());
+            jit_log(log_level, "    n_layout: %u != %u", this->layout.size(),
+                    rhs->layout.size());
             return;
         }
 
@@ -1391,35 +1404,35 @@ struct RecordingKey {
             // if (lhs_layout == rhs_layout)
             //     continue;
 
-            jit_log(LogLevel::Debug, "    layout %u:", i);
+            jit_log(log_level, "    layout %u:", i);
             if (!lhs_layout.type.is_none() && !rhs_layout.type.is_none() &&
                 !lhs_layout.type.equal(rhs_layout.type))
-                jit_log(LogLevel::Debug, "    type: %s != %s",
+                jit_log(log_level, "    type: %s != %s",
                         nb::type_name(lhs_layout.type).c_str(),
                         nb::type_name(rhs_layout.type).c_str());
             if (lhs_layout.num != rhs_layout.num)
-                jit_log(LogLevel::Debug, "    num: %u != %u", lhs_layout.num,
+                jit_log(log_level, "    num: %u != %u", lhs_layout.num,
                         rhs_layout.num);
             if (lhs_layout.vt != rhs_layout.vt)
-                jit_log(LogLevel::Debug, "    vt: %u != %u", lhs_layout.vt,
+                jit_log(log_level, "    vt: %u != %u", lhs_layout.vt,
                         rhs_layout.vt);
             if (lhs_layout.vs != rhs_layout.vs)
-                jit_log(LogLevel::Debug, "    vs: %u != %u", lhs_layout.vs,
+                jit_log(log_level, "    vs: %u != %u", lhs_layout.vs,
                         rhs_layout.vs);
             if (lhs_layout.flags != rhs_layout.flags)
-                jit_log(LogLevel::Debug, "    singleton_array: %u != %u",
+                jit_log(log_level, "    singleton_array: %u != %u",
                         lhs_layout.flags, rhs_layout.flags);
             if (lhs_layout.literal != rhs_layout.literal)
-                jit_log(LogLevel::Debug, "    literal: %u != %u",
-                        lhs_layout.literal, rhs_layout.literal);
+                jit_log(log_level, "    literal: %u != %u", lhs_layout.literal,
+                        rhs_layout.literal);
             if (lhs_layout.index != rhs_layout.index)
-                jit_log(LogLevel::Debug, "    index: %u != %u",
-                        lhs_layout.index, rhs_layout.index);
+                jit_log(log_level, "    index: %u != %u", lhs_layout.index,
+                        rhs_layout.index);
             if (lhs_layout.size_index != rhs_layout.size_index)
-                jit_log(LogLevel::Debug, "    size_index: %u != %u",
+                jit_log(log_level, "    size_index: %u != %u",
                         lhs_layout.size_index, rhs_layout.size_index);
             if (!(lhs_layout.py_object.equal(rhs_layout.py_object)))
-                jit_log(LogLevel::Debug, "    py_object: %s != %s",
+                jit_log(log_level, "    py_object: %s != %s",
                         nb::str(lhs_layout.py_object).c_str(),
                         nb::str(rhs_layout.py_object).c_str());
         }
@@ -1535,7 +1548,7 @@ struct FrozenFunction {
             if (this->recordings.size() >= 1) {
                 jit_log(LogLevel::Info,
                         "Function input missmatch! Function will be retraced.");
-                key.log_diff(&prev_key);
+                key.log_diff(&prev_key, LogLevel::Debug);
             }
             // FunctionRecording recording;
             auto recording = std::make_unique<FunctionRecording>();
@@ -1568,7 +1581,7 @@ struct FrozenFunction {
                 result = recording->replay(func, input, in_variables);
                 ad_scope_leave(true);
             }
-            
+
             in_variables.drop_variables();
 
             return result;
