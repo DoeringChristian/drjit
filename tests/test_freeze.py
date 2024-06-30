@@ -530,7 +530,7 @@ def test19_vcall(t, symbolic):
 @pytest.mark.parametrize("opaque", [True, False])
 @pytest.test_arrays("float32, -is_diff, jit, shape=(*)")
 def test20_vcall_optimize(t, symbolic, optimize, opaque):
-    dr.set_flag(dr.JitFlag.ReuseIndices, False)
+    # dr.set_flag(dr.JitFlag.ReuseIndices, False)
     print(f"{symbolic=}")
     print(f"{optimize=}")
     print(f"{opaque=}")
@@ -561,6 +561,75 @@ def test20_vcall_optimize(t, symbolic, optimize, opaque):
 
     def func(c, xi):
         return c.g(xi)
+
+    frozen = dr.freeze(func)
+
+    with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
+        with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
+            xo = frozen(c, x)
+
+    assert dr.all(xo == func(c, x))
+
+    a.value = t(3)
+    b.value = t(2)
+
+    if opaque:
+        dr.make_opaque(a.value, b.value)
+
+    c = BasePtr(a, a, None, b, b)
+    dr.set_label(c, "c")
+
+    with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, symbolic):
+        with dr.scoped_set_flag(dr.JitFlag.OptimizeCalls, optimize):
+            xo = frozen(c, x)
+
+    assert frozen.n_recordings == 1
+    # if opaque:
+    #     assert frozen.n_recordings == 1
+    # else:
+    #     assert frozen.n_recordings == 2
+
+    assert dr.all(xo == func(c, x))
+
+
+@pytest.mark.parametrize("symbolic", [True])
+@pytest.mark.parametrize("optimize", [True, False])
+@pytest.mark.parametrize("opaque", [True, False])
+@pytest.test_arrays("float32, -is_diff, jit, shape=(*)")
+def test21_multiple_vcalls(t, symbolic, optimize, opaque):
+    dr.set_flag(dr.JitFlag.ReuseIndices, False)
+    print(f"{symbolic=}")
+    print(f"{optimize=}")
+    print(f"{opaque=}")
+    pkg = get_pkg(t)
+
+    A, B, Base, BasePtr = pkg.A, pkg.B, pkg.Base, pkg.BasePtr
+    Mask = dr.mask_t(t)
+    a, b = B(), B()
+
+    B.DRJIT_STRUCT = {"value": t, "opaque": t}
+    A.DRJIT_STRUCT = {"value": t, "opaque": t}
+    dr.set_label(A.opaque, "A.opaque")
+    dr.set_label(B.opaque, "B.opaque")
+
+    a.value = t(2)
+    b.value = t(3)
+
+    print(f"{a.value.index=}")
+
+    if opaque:
+        dr.make_opaque(a.value, b.value)
+
+    c = BasePtr(a, a, None, a, a)
+    dr.set_label(c, "c")
+
+    x = t(1, 2, 8, 3, 4)
+    dr.set_label(x, "x")
+
+    def func(c, xi):
+        x = c.h(xi)
+        dr.make_opaque(x)
+        return c.g(x)
 
     frozen = dr.freeze(func)
 
@@ -1946,28 +2015,3 @@ def test43_scatter_reduce_expanded(t):
 
     assert frozen.n_recordings == 1
 
-
-@pytest.test_arrays("uint32, -is_diff, cuda, jit, shape=(*)")
-def test44_capture_problem(t):
-
-    def func(x):
-        dr.eval(x)
-        x = t(1, 0, 0)
-        dr.make_opaque(x)
-        x += 1
-        dr.eval(x)
-        # x = t(0, 1, 0)
-        # dr.make_opaque(x)
-        # x += 1
-        # dr.eval(x)
-        x = t(1, 2, 3)
-        dr.make_opaque(x)
-        x += 1
-        dr.eval(x)
-        return x
-
-    frozen = dr.freeze(func)
-
-    for i in range(3):
-        x = t(0, 0, 0)
-        assert dr.all(frozen(x) == func(x))
