@@ -518,6 +518,24 @@ struct FlatVariables {
                     nb::object k = field.attr(DR_STR(name));
                     traverse(nb::getattr(h, k));
                 }
+            } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
+                // use the cb_rw function if available to prevent different
+                // order between `traverse` and `assign`
+                Layout layout;
+                layout.type = nb::borrow<nb::type_object>(tp);
+                size_t layout_index = this->layout.size();
+                this->layout.push_back(layout);
+
+                uint32_t num_fileds = 0;
+
+                cb(h, nb::cpp_function([&](uint64_t index) {
+                       num_fileds++;
+                       this->add_var_ad_index(index, nb::none());
+                       return index;
+                   }));
+
+                // Update layout number of fields
+                this->layout[layout_index].num = num_fileds;
             } else if (nb::object cb = get_traverse_cb_ro(tp); cb.is_valid()) {
                 Layout layout;
                 layout.type = nb::borrow<nb::type_object>(tp);
