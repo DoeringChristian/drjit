@@ -597,7 +597,7 @@ def test20_vcall_optimize(t, symbolic, optimize, opaque):
 @pytest.mark.parametrize("opaque", [True, False])
 @pytest.test_arrays("float32, -is_diff, jit, shape=(*)")
 def test21_multiple_vcalls(t, symbolic, optimize, opaque):
-    dr.set_flag(dr.JitFlag.ReuseIndices, False)
+    # dr.set_flag(dr.JitFlag.ReuseIndices, False)
     print(f"{symbolic=}")
     print(f"{optimize=}")
     print(f"{opaque=}")
