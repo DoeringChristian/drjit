@@ -16,6 +16,16 @@
 #include <tsl/robin_map.h>
 #include <vector>
 
+struct ProfilerPhase {
+    ProfilerPhase(const char *message) {
+        jit_profile_range_push(message);
+    }
+
+    ~ProfilerPhase() {
+        jit_profile_range_pop();
+    }
+};
+
 static const char *doc_freeze = R"(
     
 )";
@@ -1265,6 +1275,7 @@ struct FunctionRecording {
      */
     nb::object record(nb::callable func, nb::list input,
                       const FlatVariables &in_variables) {
+        ProfilerPhase profiler("record");
         JitBackend backend = in_variables.backend;
 
         jit_log(LogLevel::Info,
@@ -1285,6 +1296,7 @@ struct FunctionRecording {
         // Eval the input and output and it's gradients.
         jit_log(LogLevel::Debug, "Evaluating output:");
         {
+            ProfilerPhase profiler("evaluate output");
             ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
             deep_make_opaque(input, false);
             deep_eval(result, false);
@@ -1329,7 +1341,21 @@ struct FunctionRecording {
         jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
                 out_variables.variables.size());
 
-        return output[0];
+        {
+            // For catching input assignment missmatches, we asign the input
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+
+            out_variables.layout_index = 1;
+            jit_log(LogLevel::Debug, "Construct:");
+            output = nb::borrow<nb::list>(out_variables.construct());
+            jit_log(LogLevel::Debug, "Assign:");
+            out_variables.assign(input);
+            out_variables.layout_index = 0;
+
+            ad_scope_leave(true);
+        }
+
+        return output;
     }
     /*
      * Replays the recording.
@@ -1338,6 +1364,7 @@ struct FunctionRecording {
      */
     nb::object replay(nb::callable func, nb::list input,
                       const FlatVariables &in_variables) {
+        ProfilerPhase profiler("replay");
 
         jit_log(LogLevel::Info, "Replaying:");
         try {
