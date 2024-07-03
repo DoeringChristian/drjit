@@ -1296,7 +1296,7 @@ struct FunctionRecording {
         // Eval the input and output and it's gradients.
         jit_log(LogLevel::Debug, "Evaluating output:");
         {
-            ProfilerPhase profiler("evaluate output");
+            ProfilerPhase profiler("evaluate input + output");
             ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
             deep_make_opaque(input, false);
             deep_eval(result, false);
@@ -1317,6 +1317,7 @@ struct FunctionRecording {
 
         jit_log(LogLevel::Info, "Traversing output");
         {
+            ProfilerPhase profiler("traverse output");
             ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
             out_variables.traverse(output);
             ad_scope_leave(false);
@@ -1364,10 +1365,10 @@ struct FunctionRecording {
      */
     nb::object replay(nb::callable func, nb::list input,
                       const FlatVariables &in_variables) {
-        ProfilerPhase profiler("replay");
 
         jit_log(LogLevel::Info, "Replaying:");
         try {
+            ProfilerPhase profiler("replay");
             jit_record_replay(recording, in_variables.variables.data(),
                               out_variables.variables.data());
         } catch (const std::exception &e) {
@@ -1559,6 +1560,7 @@ struct FrozenFunction {
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
 
         if (!jit_flag(JitFlag::KernelFreezing)) {
+            ProfilerPhase profiler("function");
             return func(*args, **kwargs);
         }
 
@@ -1572,8 +1574,12 @@ struct FrozenFunction {
 
             // Evaluate input variables, forcing evaluation of undefined
             // variables NOTE: not sure, why both are necessary
-            deep_make_opaque(input);
+            {
+                ProfilerPhase profiler("evaluate input");
+                deep_make_opaque(input);
+            }
 
+            ProfilerPhase profiler("traverse input");
             // Traverse input variables
             jit_log(LogLevel::Debug, "freeze(): Traversing input.");
             in_variables.traverse(input);
