@@ -711,7 +711,7 @@ struct FlatVariables {
         const ArraySupplement &s = supp(layout.type);
 
         if (s.is_class) {
-            return construct_dr_class_var(layout);
+            nb::raise("Tried to construct a polymorphic drjit variable");
         } else {
             return construct_flat_dr_var(layout, shrink);
         }
@@ -821,8 +821,9 @@ struct FlatVariables {
             Layout &layout =
                 payload->flat_vars->layout[payload->flat_vars->layout_index++];
 
-            if (layout.vt != (VarType)jit_var_type(index))
-                jit_fail("VarType missmatch!");
+            if (layout.vt != jit_var_type(index))
+                jit_fail("VarType missmatch %u != %u!", (uint32_t) layout.vt,
+                         (uint32_t) jit_var_type(index));
 
             uint64_t new_index = payload->flat_vars->construct_ad_index(layout);
             payload->tmp.push_back(new_index);
@@ -961,7 +962,8 @@ struct FlatVariables {
                 cb(dst, nb::cpp_function([&](uint64_t index) {
                        Layout &layout = this->layout[layout_index++];
                        if (layout.vt != (VarType)jit_var_type(index))
-                           jit_fail("VarType missmatch!");
+                            jit_fail("VarType missmatch %u != %u!", (uint32_t) layout.vt,
+                                     (uint32_t) jit_var_type(index));
 
                        uint64_t new_index = this->construct_ad_index(layout);
                        tmp.push_back(new_index);
@@ -1286,7 +1288,11 @@ struct FunctionRecording {
         // Record the function
         bool tmp = jit_flag(JitFlag::KernelFreezing);
         jit_set_flag(JitFlag::KernelFreezing, false);
-        auto result = func(*input[0], **input[1]);
+        nb::object result;
+        {
+            ProfilerPhase profiler("function");
+            result = func(*input[0], **input[1]);
+        }
         jit_set_flag(JitFlag::KernelFreezing, tmp);
 
         nb::list output;
