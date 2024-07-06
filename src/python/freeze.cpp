@@ -430,8 +430,8 @@ struct FlatVariables {
     void traverse(nb::handle h) {
         nb::handle tp = h.type();
 
-        // nb::print(tp);
-        // nb::print("{");
+        nb::print(tp);
+        nb::print("{");
 
         try {
             if (is_drjit_type(tp)) {
@@ -592,7 +592,7 @@ struct FlatVariables {
             nb::raise_python_error();
         }
 
-        // nb::print("}");
+        nb::print("}");
     }
 
     /**

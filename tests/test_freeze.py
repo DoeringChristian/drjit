@@ -2015,3 +2015,23 @@ def test43_scatter_reduce_expanded(t):
 
     assert frozen.n_recordings == 1
 
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test44_python_inputs(t):
+
+    def func(x: t, neg: bool):
+        if neg:
+            return - x + 1
+        else:
+            return x + 1
+
+    frozen = dr.freeze(func)
+
+    for i in range(3):
+        for neg in [False, True]:
+            x = t(1, 2, 3) + dr.opaque(t, i)
+
+            res = frozen(x, neg)
+            ref = func(x, neg)
+            assert dr.all(res == ref)
+
+    assert frozen.n_recordings == 2
