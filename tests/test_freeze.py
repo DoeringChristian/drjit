@@ -2035,3 +2035,59 @@ def test44_python_inputs(t):
             assert dr.all(res == ref)
 
     assert frozen.n_recordings == 2
+
+    
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test35_scatter_inc(t):
+    
+    mod = sys.modules[t.__module__]
+    Float = mod.Float32
+    UInt32 = mod.UInt32
+    
+    n = 37
+
+    def acc_with_scatter_inc(x, counter, out_buffer, max_points):
+        active = x > 0.5
+        out_idx = dr.scatter_inc(counter, UInt32(0), active=active)
+        active &= out_idx < max_points
+
+        # TODO: also test within a loop
+        dr.scatter(out_buffer, x, out_idx, active=active)
+
+    
+    def test(i, func):
+        x = dr.linspace(Float, 0.1, 1, n + i) + dr.opaque(Float, i) / 100
+        counter = UInt32(dr.opaque(UInt32, 0))
+        out_buffer = dr.zeros(Float, 10)
+        max_points = UInt32(dr.opaque(UInt32, dr.width(out_buffer)))
+
+        dr.set_label(x, "x")
+        dr.set_label(counter, "counter")
+        dr.set_label(out_buffer, "out_buffer")
+        dr.set_label(max_points, "max_points")
+        dr.eval(x, counter, out_buffer, max_points)
+        
+        func(x, counter, out_buffer, max_points)
+
+        return out_buffer, counter
+
+    def func(i):
+        return test(i, acc_with_scatter_inc)
+
+    acc_with_scatter_inc = dr.freeze(acc_with_scatter_inc)
+
+    
+    def frozen(i):
+        return test(i, acc_with_scatter_inc)
+        
+
+
+    for i in range(3):
+
+        res, _ = frozen(i)
+        ref, _ = func(i)
+
+        assert dr.all(res == ref)
+
+        # Should have filled all of the entries
+        assert dr.all(res > 0.5)
