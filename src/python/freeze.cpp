@@ -1286,14 +1286,14 @@ struct FunctionRecording {
                          in_variables.variables.size());
 
         // Record the function
-        bool tmp = jit_flag(JitFlag::KernelFreezing);
+        // bool tmp = jit_flag(JitFlag::KernelFreezing);
         jit_set_flag(JitFlag::KernelFreezing, false);
         nb::object result;
         {
             ProfilerPhase profiler("function");
             result = func(*input[0], **input[1]);
         }
-        jit_set_flag(JitFlag::KernelFreezing, tmp);
+        jit_set_flag(JitFlag::KernelFreezing, true);
 
         nb::list output;
         output.append(result);
@@ -1566,6 +1566,7 @@ struct FrozenFunction {
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
 
         if (!jit_flag(JitFlag::KernelFreezing)) {
+            jit_fail("test");
             ProfilerPhase profiler("function");
             return func(*args, **kwargs);
         }
@@ -1616,6 +1617,7 @@ struct FrozenFunction {
             } catch (const std::exception &e) {
                 in_variables.drop_variables();
                 jit_record_abort(in_variables.backend);
+                jit_set_flag(JitFlag::KernelFreezing, true);
 
                 nb::chain_error(PyExc_RuntimeError, "freeze(): %s", e.what());
                 nb::raise_python_error();

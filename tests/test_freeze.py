@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import sys
 
 dr.set_log_level(dr.LogLevel.Trace)
+dr.set_flag(dr.JitFlag.KernelFreezing, True)
 
 
 def get_single_entry(x):
@@ -2088,3 +2089,18 @@ def test35_scatter_inc(t):
 
         # Should have filled all of the entries
         assert dr.all(res > 0.5)
+
+
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test36_read_while_frozen(t):
+    # dr.set_flag(dr.JitFlag.KernelFreezing, True)
+    assert dr.flag(dr.JitFlag.KernelFreezing)
+
+    def func(x):
+        return x[1]
+
+    frozen = dr.freeze(func)
+
+    x = t(1, 2, 3)
+    with pytest.raises(RuntimeError, match = "reading from evaluated variables while recording a frozen function is not supported!"):
+        frozen(x)
