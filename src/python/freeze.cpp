@@ -822,8 +822,8 @@ struct FlatVariables {
                 payload->flat_vars->layout[payload->flat_vars->layout_index++];
 
             if (layout.vt != jit_var_type(index))
-                jit_fail("VarType missmatch %u != %u!", (uint32_t) layout.vt,
-                         (uint32_t) jit_var_type(index));
+                jit_fail("VarType missmatch %u != %u!", (uint32_t)layout.vt,
+                         (uint32_t)jit_var_type(index));
 
             uint64_t new_index = payload->flat_vars->construct_ad_index(layout);
             payload->tmp.push_back(new_index);
@@ -962,8 +962,9 @@ struct FlatVariables {
                 cb(dst, nb::cpp_function([&](uint64_t index) {
                        Layout &layout = this->layout[layout_index++];
                        if (layout.vt != (VarType)jit_var_type(index))
-                            jit_fail("VarType missmatch %u != %u!", (uint32_t) layout.vt,
-                                     (uint32_t) jit_var_type(index));
+                           jit_fail("VarType missmatch %u != %u!",
+                                    (uint32_t)layout.vt,
+                                    (uint32_t)jit_var_type(index));
 
                        uint64_t new_index = this->construct_ad_index(layout);
                        tmp.push_back(new_index);
@@ -1566,7 +1567,6 @@ struct FrozenFunction {
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
 
         if (!jit_flag(JitFlag::KernelFreezing)) {
-            jit_fail("test");
             ProfilerPhase profiler("function");
             return func(*args, **kwargs);
         }
