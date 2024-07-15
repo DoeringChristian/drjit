@@ -1304,7 +1304,7 @@ struct FunctionRecording {
         jit_log(LogLevel::Debug, "Evaluating output:");
         {
             ProfilerPhase profiler("evaluate input + output");
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, -1);
             deep_make_opaque(input, false);
             deep_eval(result, false);
             {
@@ -1325,7 +1325,7 @@ struct FunctionRecording {
         jit_log(LogLevel::Info, "Traversing output");
         {
             ProfilerPhase profiler("traverse output");
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
             out_variables.traverse(output);
             ad_scope_leave(false);
         }
@@ -1351,7 +1351,7 @@ struct FunctionRecording {
 
         {
             // For catching input assignment missmatches, we asign the input
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
 
             out_variables.layout_index = 1;
             jit_log(LogLevel::Debug, "Construct:");
@@ -1577,7 +1577,7 @@ struct FrozenFunction {
 
         FlatVariables in_variables(true);
         {
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
 
             // Evaluate input variables, forcing evaluation of undefined
             // variables NOTE: not sure, why both are necessary
@@ -1636,7 +1636,7 @@ struct FrozenFunction {
 
             nb::object result;
             {
-                ad_scope_enter(drjit::ADScope::Resume, 0, nullptr);
+                ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
                 result = recording->replay(func, input, in_variables);
                 ad_scope_leave(true);
             }
