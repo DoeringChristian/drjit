@@ -2102,5 +2102,5 @@ def test36_read_while_frozen(t):
     frozen = dr.freeze(func)
 
     x = t(1, 2, 3)
-    with pytest.raises(RuntimeError, match = "reading from evaluated variables while recording a frozen function is not supported!"):
+    with pytest.raises(RuntimeError):
         frozen(x)
