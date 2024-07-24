@@ -291,15 +291,15 @@ struct FlatVariables {
     void add_var_ad_index(uint64_t index, nb::handle tp = nb::none()) {
         int grad_enabled = ad_grad_enabled(index);
         jit_log(LogLevel::Debug,
-                "traverse(): adding ad var 0x%016llx = (var=%u, ad=%u, "
-                "grad_enabled=%u)",
-                index, index, (index >> 32), grad_enabled);
+                "traverse(): adding var (a%u, r%u)",
+                (uint32_t)(index >> 32), (uint32_t)index, grad_enabled);
         if (grad_enabled) {
             jit_log(LogLevel::Debug, " => collecting ad var");
             Layout layout;
             layout.type = nb::borrow<nb::type_object>(tp);
             layout.num = 2;
             layout.flags |= (uint32_t)LayoutFlag::GradEnabled;
+            layout.vt = jit_var_type(index);
             this->layout.push_back(layout);
 
             add_var_jit_index(index, tp);
@@ -539,10 +539,10 @@ struct FlatVariables {
                 uint32_t num_fileds = 0;
 
                 cb(h, nb::cpp_function([&](uint64_t index) {
-                       num_fileds++;
-                       this->add_var_ad_index(index, nb::none());
-                       return index;
-                   }));
+                    num_fileds++;
+                    this->add_var_ad_index(index, nb::none());
+                    return index;
+                }));
 
                 // Update layout number of fields
                 this->layout[layout_index].num = num_fileds;
@@ -622,7 +622,7 @@ struct FlatVariables {
      * It returns a owning reference.
      */
     uint64_t construct_ad_index(const Layout &layout, uint32_t shrink = 0) {
-        jit_log(LogLevel::Debug, "construct(): flat var");
+        jit_log(LogLevel::Debug, "construct(): ad index");
         uint64_t index;
         if ((layout.flags & (uint32_t)LayoutFlag::GradEnabled) != 0) {
             Layout &val_layout = this->layout[layout_index++];
@@ -897,8 +897,8 @@ struct FlatVariables {
         nb::handle tp = dst.type();
         Layout &layout = this->layout[layout_index++];
 
-        // nb::print(tp);
-        // nb::print("{");
+        nb::print(tp);
+        nb::print("{");
 
         if (!layout.type.equal(tp))
             nb::raise("Type missmatch! Type of original object %s does not "
@@ -911,7 +911,11 @@ struct FlatVariables {
                 const ArraySupplement &s = supp(tp);
 
                 if (s.is_tensor) {
-                    assign_dr_var(layout, dst);
+                    nb::handle array = s.tensor_array(dst.ptr());
+
+                    Layout &array_layout = this->layout[layout_index++];
+                    
+                    assign_dr_var(array_layout, array);
                 } else if (s.ndim != 1) {
                     Py_ssize_t len = s.shape[0];
                     if (len == DRJIT_DYNAMIC)
@@ -960,16 +964,22 @@ struct FlatVariables {
             } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
                 std::vector<uint64_t> tmp;
                 cb(dst, nb::cpp_function([&](uint64_t index) {
-                       Layout &layout = this->layout[layout_index++];
-                       if (layout.vt != (VarType)jit_var_type(index))
-                           jit_fail("VarType missmatch %u != %u!",
-                                    (uint32_t)layout.vt,
-                                    (uint32_t)jit_var_type(index));
+                    jit_log(LogLevel::Debug, "Travers node");
+                    Layout &layout = this->layout[layout_index++];
 
-                       uint64_t new_index = this->construct_ad_index(layout);
-                       tmp.push_back(new_index);
-                       return new_index;
-                   }));
+
+                    uint64_t new_index = this->construct_ad_index(layout);
+
+                    if (layout.vt != (VarType)jit_var_type(index))
+                        jit_fail("VarType missmatch %u != %u while assigning (a%u, r%u) -> (a%u, r%u)!",
+                                 (uint32_t)layout.vt,
+                                 (uint32_t)jit_var_type(index),
+                                 (uint32_t)(index >> 32), (uint32_t)index, (uint32_t)(new_index >> 32), (uint32_t)new_index
+                                 );
+                
+                    tmp.push_back(new_index);
+                    return new_index;
+                }));
                 for (uint32_t index : tmp)
                     ad_var_dec_ref(index);
             } else {
@@ -1383,10 +1393,14 @@ struct FunctionRecording {
             this->clear();
             try {
                 return this->record(func, input, in_variables);
+            } catch (nb::python_error &e) {
+                nb::raise_from(e, PyExc_RuntimeError,
+                               "replay(): error encountered while re-recording a "
+                               "function (see above).");
             } catch (const std::exception &e) {
                 jit_record_abort(in_variables.backend);
 
-                nb::chain_error(PyExc_RuntimeError, "freeze(): %s", e.what());
+                nb::chain_error(PyExc_RuntimeError, "record(): %s", e.what());
                 nb::raise_python_error();
             }
         }
@@ -1614,12 +1628,20 @@ struct FrozenFunction {
             nb::object result;
             try {
                 result = recording->record(func, input, in_variables);
+            } catch (nb::python_error &e) {
+                in_variables.drop_variables();
+                jit_record_abort(in_variables.backend);
+                jit_set_flag(JitFlag::KernelFreezing, true);
+                nb::raise_from(e, PyExc_RuntimeError,
+                               "record(): error encountered while recording a "
+                               "function (see above).");
+                
             } catch (const std::exception &e) {
                 in_variables.drop_variables();
                 jit_record_abort(in_variables.backend);
                 jit_set_flag(JitFlag::KernelFreezing, true);
 
-                nb::chain_error(PyExc_RuntimeError, "freeze(): %s", e.what());
+                nb::chain_error(PyExc_RuntimeError, "record(): %s", e.what());
                 nb::raise_python_error();
             };
 
