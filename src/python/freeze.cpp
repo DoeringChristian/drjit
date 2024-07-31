@@ -1384,12 +1384,15 @@ struct FunctionRecording {
                       const FlatVariables &in_variables) {
 
         jit_log(LogLevel::Info, "Replaying:");
-        try {
-            ProfilerPhase profiler("replay");
-            jit_record_replay(recording, in_variables.variables.data(),
-                              out_variables.variables.data());
-        } catch (const std::exception &e) {
-            // For now just assume it's a RequireRetraceException
+        int dryrun_success;
+        {
+            ProfilerPhase profiler("dry run");
+            dryrun_success =
+                jit_record_dry_run(recording, in_variables.variables.data(),
+                                    out_variables.variables.data());
+        }
+        if(dryrun_success == false){
+            // Dry run has failed. Re-record the function.
             this->clear();
             try {
                 return this->record(func, input, in_variables);
@@ -1403,6 +1406,12 @@ struct FunctionRecording {
                 nb::chain_error(PyExc_RuntimeError, "record(): %s", e.what());
                 nb::raise_python_error();
             }
+        }else{
+            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
+            ProfilerPhase profiler("replay");
+            jit_record_replay(recording, in_variables.variables.data(),
+                              out_variables.variables.data());
+            ad_scope_leave(true);
         }
         jit_log(LogLevel::Info, "Replaying done:");
 
@@ -1658,9 +1667,7 @@ struct FrozenFunction {
 
             nb::object result;
             {
-                ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
                 result = recording->replay(func, input, in_variables);
-                ad_scope_leave(true);
             }
 
             in_variables.drop_variables();
