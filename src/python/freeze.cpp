@@ -1391,8 +1391,9 @@ struct FunctionRecording {
                 jit_record_dry_run(recording, in_variables.variables.data(),
                                     out_variables.variables.data());
         }
-        if(dryrun_success == false){
+        if(!dryrun_success){
             // Dry run has failed. Re-record the function.
+            jit_log(LogLevel::Warn, "re-recording");
             this->clear();
             try {
                 return this->record(func, input, in_variables);
