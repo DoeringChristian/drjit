@@ -1416,12 +1416,15 @@ struct FunctionRecording {
         }
         jit_log(LogLevel::Info, "Replaying done:");
 
-        // out_variables.log_layout();
+        ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
+        
         out_variables.layout_index = 1;
         jit_log(LogLevel::Debug, "Construct:");
         auto result = nb::borrow<nb::list>(out_variables.construct());
         jit_log(LogLevel::Debug, "Assign:");
         out_variables.assign(input);
+        
+        ad_scope_leave(true);
 
         // out_variables is assigned by jit_record_replay, which transfers
         // ownership to this array. Therefore, we have to drop the variables
