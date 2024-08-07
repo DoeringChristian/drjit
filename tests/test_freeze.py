@@ -2104,3 +2104,26 @@ def test36_read_while_frozen(t):
     x = t(1, 2, 3)
     with pytest.raises(RuntimeError):
         frozen(x)
+
+@pytest.test_arrays("float32, jit, cuda, diff, shape=(*)")
+def test37_var_upload(t):
+
+    def func(x):
+
+        for i in range(1):
+            y = dr.arange(t, 3)
+            dr.make_opaque(y)
+            del y
+        
+        return x / t(10, 10, 10)
+
+
+    frozen = dr.freeze(func)
+
+    for i in range(3):
+        x = dr.arange(t, 3)
+        dr.make_opaque(x)
+
+        z = frozen(x)
+
+        assert dr.allclose(z, func(x))
