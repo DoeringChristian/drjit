@@ -2105,15 +2105,21 @@ def test36_read_while_frozen(t):
     with pytest.raises(RuntimeError):
         frozen(x)
 
-@pytest.test_arrays("float32, jit, cuda, diff, shape=(*)")
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
 def test37_var_upload(t):
+    dr.set_flag(dr.JitFlag.ReuseIndices, False)
 
     def func(x):
 
-        for i in range(1):
+        arrays = []
+
+        for i in range(3):
             y = dr.arange(t, 3)
             dr.make_opaque(y)
-            del y
+            arrays.append(y)
+
+        del arrays
+        del y
         
         return x / t(10, 10, 10)
 

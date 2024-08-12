@@ -345,6 +345,8 @@ struct FlatVariables {
         Payload payload{this, 0};
         traversable->traverse_1_cb_ro(
             (void *)&payload, [](void *p, uint64_t index) {
+                if(!index)
+                    return;
                 Payload *payload = (Payload *)p;
                 payload->num_fields++;
                 payload->flat_vars->add_var_ad_index(index);
@@ -528,24 +530,6 @@ struct FlatVariables {
                     nb::object k = field.attr(DR_STR(name));
                     traverse(nb::getattr(h, k));
                 }
-            } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
-                // use the cb_rw function if available to prevent different
-                // order between `traverse` and `assign`
-                Layout layout;
-                layout.type = nb::borrow<nb::type_object>(tp);
-                size_t layout_index = this->layout.size();
-                this->layout.push_back(layout);
-
-                uint32_t num_fileds = 0;
-
-                cb(h, nb::cpp_function([&](uint64_t index) {
-                    num_fileds++;
-                    this->add_var_ad_index(index, nb::none());
-                    return index;
-                }));
-
-                // Update layout number of fields
-                this->layout[layout_index].num = num_fileds;
             } else if (nb::object cb = get_traverse_cb_ro(tp); cb.is_valid()) {
                 Layout layout;
                 layout.type = nb::borrow<nb::type_object>(tp);
@@ -555,6 +539,8 @@ struct FlatVariables {
                 uint32_t num_fileds = 0;
 
                 cb(h, nb::cpp_function([&](uint64_t index) {
+                       if (!index)
+                           return;
                        num_fileds++;
                        this->add_var_ad_index(index, nb::none());
                    }));
@@ -814,8 +800,10 @@ struct FlatVariables {
             std::vector<uint64_t> tmp;
         };
         Payload payload{this, std::vector<uint64_t>()};
-        traversable->traverse_1_cb_rw((void *)&payload, [](void *p,
-                                                           uint64_t index) {
+        traversable->traverse_1_cb_rw((void *) &payload, [](void *p,
+                                                            uint64_t index) {
+            if (!index)
+                return index;
             Payload *payload = (Payload *)p;
 
             Layout &layout =
@@ -964,6 +952,8 @@ struct FlatVariables {
             } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
                 std::vector<uint64_t> tmp;
                 cb(dst, nb::cpp_function([&](uint64_t index) {
+                    if(!index)
+                        return index;
                     jit_log(LogLevel::Debug, "Travers node");
                     Layout &layout = this->layout[layout_index++];
 
@@ -1153,6 +1143,8 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
             // This is accomplished by storing them.
             std::vector<uint64_t> tmp;
             cb(h, nb::cpp_function([&](uint64_t index) {
+                   if (!index)
+                       return index;
                    uint64_t new_index = op(index);
                    tmp.push_back(new_index);
                    return new_index;
