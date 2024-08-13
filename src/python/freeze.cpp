@@ -1170,7 +1170,7 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
                 uint32_t grad = ad_grad(index);
 
                 int rv = 0;
-                new_index = ad_var_schedule_force(index, &rv);
+                new_index = jit_var_schedule_force(index, &rv);
                 if (rv)
                     result = true;
 
@@ -1181,6 +1181,7 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
                 if (rv)
                     result = true;
 
+                new_index = ad_var_new(new_index);
                 ad_clear_grad(new_index);
                 ad_accum_grad(new_index, new_grad);
                 jit_var_dec_ref(new_grad);
