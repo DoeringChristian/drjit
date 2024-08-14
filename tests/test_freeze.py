@@ -2107,7 +2107,6 @@ def test36_read_while_frozen(t):
 
 @pytest.test_arrays("float32, jit, diff, shape=(*)")
 def test37_var_upload(t):
-    dr.set_flag(dr.JitFlag.ReuseIndices, False)
 
     def func(x):
 
@@ -2133,3 +2132,49 @@ def test37_var_upload(t):
         z = frozen(x)
 
         assert dr.allclose(z, func(x))
+
+@pytest.test_arrays("float32, jit, cuda, diff, shape=(*)")
+def test38_grad_isolate(t):
+    dr.set_flag(dr.JitFlag.ReuseIndices, False)
+
+    def f(x):
+        return x * 2
+    def g(y):
+        return y * 3
+
+    def func(y):
+        dr.enable_grad(y)
+        z = g(y)
+        print("backward")
+        dr.backward(z)
+
+    frozen = dr.freeze(func)
+
+    for i in range(3):
+        
+        print("Reference:")
+        x = dr.arange(t, 3)
+        dr.make_opaque(x)
+        dr.enable_grad(x)
+
+        y = f(x)
+        with dr.isolate_grad():
+            func(y)
+
+        ref = dr.grad(x)
+        print(f"{ref=}")
+        
+        print("Frozen:")
+        x = dr.arange(t, 3)
+        dr.make_opaque(x)
+        dr.enable_grad(x)
+
+        y = f(x)
+        dr.make_opaque(y)
+        frozen(y)
+        print(f"{dr.grad(x)=}")
+
+        res = dr.grad(x)
+
+        assert dr.allclose(ref, res)
+
