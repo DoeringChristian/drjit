@@ -4,7 +4,9 @@
 #include "common.h"
 #include "drjit-core/jit.h"
 #include "drjit/array_router.h"
+#include "drjit/autodiff.h"
 #include "drjit/extra.h"
+#include "drjit/fwd.h"
 #include "drjit/traversable_base.h"
 #include "listobject.h"
 #include "nanobind/intrusive/counter.h"
@@ -607,7 +609,7 @@ struct FlatVariables {
      *
      * It returns a owning reference.
      */
-    uint64_t construct_ad_index(const Layout &layout, uint32_t shrink = 0) {
+    uint64_t construct_ad_index(const Layout &layout, uint32_t shrink = 0, uint64_t prev_index = 0) {
         jit_log(LogLevel::Debug, "construct(): ad index");
         uint64_t index;
         if ((layout.flags & (uint32_t)LayoutFlag::GradEnabled) != 0) {
@@ -624,7 +626,12 @@ struct FlatVariables {
                 grad = new_grad;
             }
 
-            index = ad_var_new(val);
+            uint32_t ad_index = (uint32_t)(prev_index >> 32);
+            if(ad_index){
+                index = (((uint64_t) ad_index) << 32) | ((uint64_t) val);
+                ad_var_inc_ref(index);
+            } else
+                index = ad_var_new(val);
 
             jit_log(LogLevel::Debug, " -> ad_var r%zu", index);
             jit_var_dec_ref(val);
@@ -632,6 +639,11 @@ struct FlatVariables {
             ad_clear_grad(index);
             ad_accum_grad(index, grad);
             jit_var_dec_ref(grad);
+
+            if(ad_index){
+                // WARN: should track which variables where enqueud
+                ad_enqueue(drjit::ADMode::Backward, index);
+            }
         } else {
             index = construct_jit_index(layout);
         }
@@ -813,7 +825,7 @@ struct FlatVariables {
                 jit_fail("VarType missmatch %u != %u!", (uint32_t)layout.vt,
                          (uint32_t)jit_var_type(index));
 
-            uint64_t new_index = payload->flat_vars->construct_ad_index(layout);
+            uint64_t new_index = payload->flat_vars->construct_ad_index(layout, 0, index);
             payload->tmp.push_back(new_index);
             return new_index;
         });
@@ -824,7 +836,11 @@ struct FlatVariables {
     void assign_flat_dr_var(Layout &layout, nb::handle dst) {
         const ArraySupplement &s = supp(layout.type);
 
-        uint64_t index = construct_ad_index(layout);
+        uint64_t index;
+        if(s.index){
+            index = construct_ad_index(layout, 0, s.index(inst_ptr(dst)));
+        } else
+            index = construct_ad_index(layout);
 
         s.reset_index(index, inst_ptr(dst));
         jit_log(LogLevel::Debug,
@@ -958,7 +974,7 @@ struct FlatVariables {
                     Layout &layout = this->layout[layout_index++];
 
 
-                    uint64_t new_index = this->construct_ad_index(layout);
+                    uint64_t new_index = this->construct_ad_index(layout, 0, index);
 
                     if (layout.vt != (VarType)jit_var_type(index))
                         jit_fail("VarType missmatch %u != %u while assigning (a%u, r%u) -> (a%u, r%u)!",
@@ -989,7 +1005,7 @@ struct FlatVariables {
             nb::raise_python_error();
         }
 
-        // nb::print("}");
+        nb::print("}");
     }
 
     void log_layout() const {
@@ -1170,7 +1186,7 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
                 uint32_t grad = ad_grad(index);
 
                 int rv = 0;
-                new_index = jit_var_schedule_force(index, &rv);
+                new_index = ad_var_schedule_force(index, &rv);
                 if (rv)
                     result = true;
 
@@ -1181,7 +1197,6 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
                 if (rv)
                     result = true;
 
-                new_index = ad_var_new(new_index);
                 ad_clear_grad(new_index);
                 ad_accum_grad(new_index, new_grad);
                 jit_var_dec_ref(new_grad);
@@ -1585,6 +1600,7 @@ struct FrozenFunction {
     }
 
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
+        ad_scope_enter(drjit::ADScope::Isolate, 0, nullptr, -1);
 
         if (!jit_flag(JitFlag::KernelFreezing)) {
             ProfilerPhase profiler("function");
@@ -1622,6 +1638,7 @@ struct FrozenFunction {
         auto key = RecordingKey(std::move(in_variables.layout), flags);
         auto it = this->recordings.find(key);
 
+        nb::object result;
         if (it == this->recordings.end()) {
             if (this->recordings.size() >= 1) {
                 jit_log(LogLevel::Info,
@@ -1631,7 +1648,6 @@ struct FrozenFunction {
             // FunctionRecording recording;
             auto recording = std::make_unique<FunctionRecording>();
 
-            nb::object result;
             try {
                 result = recording->record(func, input, in_variables);
             } catch (nb::python_error &e) {
@@ -1656,21 +1672,21 @@ struct FrozenFunction {
             this->prev_key = key;
             this->recordings.insert({std::move(key), std::move(recording)});
 
-            return result;
         } else {
             // Drop references to variables
 
             FunctionRecording *recording = it.value().get();
 
-            nb::object result;
             {
                 result = recording->replay(func, input, in_variables);
             }
 
             in_variables.drop_variables();
-
-            return result;
         }
+        ad_scope_leave(true);
+        // WARN: should track which variables where enqueud
+        ad_traverse(drjit::ADMode::Backward, (uint32_t)drjit::ADFlag::ClearVertices);
+        return result;
     }
 };
 
