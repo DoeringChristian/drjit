@@ -2133,7 +2133,7 @@ def test37_var_upload(t):
 
         assert dr.allclose(z, func(x))
 
-@pytest.test_arrays("float32, jit, cuda, diff, shape=(*)")
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
 def test38_grad_isolate(t):
     dr.set_flag(dr.JitFlag.ReuseIndices, False)
 
