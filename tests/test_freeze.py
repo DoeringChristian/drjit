@@ -2145,7 +2145,6 @@ def test38_grad_isolate(t):
     def func(y):
         dr.enable_grad(y)
         z = g(y)
-        print("backward")
         dr.backward(z)
 
     frozen = dr.freeze(func)
@@ -2162,7 +2161,6 @@ def test38_grad_isolate(t):
             func(y)
 
         ref = dr.grad(x)
-        print(f"{ref=}")
         
         print("Frozen:")
         x = dr.arange(t, 3)
@@ -2172,9 +2170,7 @@ def test38_grad_isolate(t):
         y = f(x)
         dr.make_opaque(y)
         frozen(y)
-        print(f"{dr.grad(x)=}")
 
         res = dr.grad(x)
 
         assert dr.allclose(ref, res)
-
