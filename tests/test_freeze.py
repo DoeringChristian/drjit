@@ -2174,3 +2174,51 @@ def test38_grad_isolate(t):
         res = dr.grad(x)
 
         assert dr.allclose(ref, res)
+
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
+def test39_isolate_grad_fwd(t):
+
+    def f(x):
+        return x*x
+
+    def g(y):
+          return y*2
+
+    def func(x):
+        with dr.isolate_grad():
+            y = f(x)
+            dr.forward(x)
+        return y
+
+    def frozen(x):
+        y = f(x)
+        dr.forward(x)
+        return y
+    frozen = dr.freeze(frozen)
+
+    for i in range(3):
+        x = t(i)
+        dr.make_opaque(x)
+        dr.enable_grad(x)
+
+        y = func(x)
+        # z = g(y)
+
+
+        ref = dr.grad(y)
+
+        
+        x = t(i)
+        dr.make_opaque(x)
+        dr.enable_grad(x)
+
+        y = frozen(x)
+        # z = g(y)
+
+
+        res = dr.grad(y)
+
+        print(f"{res=}")
+        
+        assert dr.allclose(ref, res)
+        
