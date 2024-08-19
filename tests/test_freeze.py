@@ -2015,6 +2015,29 @@ def test43_scatter_reduce_expanded(t):
         assert dr.all(result == reference)
 
     assert frozen.n_recordings == 1
+    
+@pytest.test_arrays("uint32, llvm, -is_diff, jit, shape=(*)")
+def test44_scatter_reduce_expanded_identity(t):
+
+    def func(src: t):
+        target = dr.zeros(t, 5)
+        dr.scatter_reduce(dr.ReduceOp.Add, target, src, dr.arange(t, dr.width(src)) % 2)
+        return target
+
+    frozen = dr.freeze(func)
+
+    for i in range(4):
+        src = dr.full(t, 1, 10 + i)
+        dr.make_opaque(src)
+
+        result =  frozen(src)
+        print(f"{result=}")
+
+        reference = func(src)
+
+        assert dr.all(result == reference)
+
+    assert frozen.n_recordings == 1
 
 
 @pytest.test_arrays("uint32, jit, shape=(*)")
