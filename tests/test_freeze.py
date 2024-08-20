@@ -2188,7 +2188,6 @@ def test38_grad_isolate(t):
         return y * 3
 
     def func(y):
-        dr.enable_grad(y)
         z = g(y)
         dr.backward(z)
 
@@ -2267,3 +2266,55 @@ def test39_isolate_grad_fwd(t):
         
         assert dr.allclose(ref, res)
         
+        
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
+def test40_grad_postponed_part(t):
+    dr.set_flag(dr.JitFlag.ReuseIndices, False)
+
+    def f(x):
+        return x * 2
+    def g(y):
+        return y * 3
+
+    def func(y1, y2):
+        z1 = g(y1)
+        z2 = g(y2)
+        dr.backward(z1)
+
+    frozen = dr.freeze(func)
+
+    def run(i, name, func):
+        print(f"{name}:")
+        x1 = dr.arange(t, 3)
+        dr.make_opaque(x1)
+        dr.enable_grad(x1)
+        y1 = f(x1)
+        
+        x2 = dr.arange(t, 3)
+        dr.make_opaque(x2)
+        dr.enable_grad(x2)
+        dr.set_grad(x2, 2)
+        y2 = f(x2)
+        
+        func(y1, y2)
+
+        dx1 = dr.grad(x1)
+        dx2_1 = dr.grad(x2)
+            
+        dr.set_grad(x2, 1)
+        dr.backward(x2)
+        dx1_2 = dr.grad(x2)
+
+        return [dx1, dx1_2, dx2_1]
+
+    for i in range(3):
+
+        def isolated(y1, y2):
+            with dr.isolate_grad():
+                func(y1, y2)
+
+        ref = run(i, "reference", isolated)
+        res = run(i, "frozen", frozen)
+        
+        for ref, res in zip(ref, res):
+            assert dr.allclose(ref, res)
