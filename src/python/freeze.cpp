@@ -1240,7 +1240,7 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
 }
 
 static void deep_eval(nb::handle h, bool eval = true) {
-    jit_log(LogLevel::Debug, "deep_schedule");
+    jit_log(LogLevel::Debug, "deep eval");
 
     struct ScheduleCallback : TransformInPlaceCallback {
         bool result = false;
@@ -1249,19 +1249,30 @@ static void deep_eval(nb::handle h, bool eval = true) {
             if (ad_grad_enabled(index)) {
                 int rv = 0;
 
-                if (jit_var_schedule(index))
+                if (jit_var_schedule(index)){
+                    jit_log(LogLevel::Debug,
+                            "   scheduled ad-variable a%u, r%u, label=%s",
+                            (uint32_t) (index >> 32), (uint32_t) index,
+                            jit_var_label(index));
                     result = true;
+                }
 
                 uint32_t grad = ad_grad(index);
-                jit_log(LogLevel::Debug, "    scheduling gradient");
-                if (jit_var_schedule(grad))
+                if (jit_var_schedule(grad)){
+                    jit_log(LogLevel::Debug, "    scheduled gradient r%u, label=%s",
+                            grad, jit_var_label(grad));
                     result = true;
+                }
                 jit_var_dec_ref(grad);
 
             } else {
                 int rv = jit_var_schedule(index);
-                if (rv)
+                if (rv){
+                    jit_log(LogLevel::Debug,
+                            "   scheduled variable r%u, label=%s",
+                            (uint32_t) index, jit_var_label(index));
                     result = true;
+                }
             }
             ad_var_inc_ref(index);
 
