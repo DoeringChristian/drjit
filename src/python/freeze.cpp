@@ -19,12 +19,15 @@
 #include <vector>
 
 struct ProfilerPhase {
-    ProfilerPhase(const char *message) {
+    const char* message;
+    ProfilerPhase(const char *message): message(message) {
+        jit_log(LogLevel::Debug, "profiler start: %s", message);
         jit_profile_range_push(message);
     }
 
     ~ProfilerPhase() {
         jit_profile_range_pop();
+        jit_log(LogLevel::Debug, "profiler end: %s", message);
     }
 };
 
@@ -1187,15 +1190,25 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
 
                 int rv = 0;
                 new_index = ad_var_schedule_force(index, &rv);
-                if (rv)
+                if (rv){
+                    jit_log(LogLevel::Debug,
+                            "   scheduled ad-variable a%u, r%u -> a%u, r%u",
+                            (uint32_t) (index >> 32), (uint32_t) index,
+                            (uint32_t) (new_index >> 32), (uint32_t) new_index);
+                    jit_log(LogLevel::Debug, "    state=%u", jit_var_state(new_index));
                     result = true;
+                }
 
-                jit_log(LogLevel::Debug, "scheduling gradient");
                 rv = 0;
                 uint32_t new_grad = jit_var_schedule_force(grad, &rv);
                 jit_var_dec_ref(grad);
-                if (rv)
+                if (rv){
+                    jit_log(LogLevel::Debug,
+                            "    scheduled gradient r%u -> r%u", grad,
+                            new_grad);
+                    jit_log(LogLevel::Debug, "    state=%u", jit_var_state(new_grad));
                     result = true;
+                }
 
                 ad_clear_grad(new_index);
                 ad_accum_grad(new_index, new_grad);
@@ -1203,13 +1216,15 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
             } else {
                 int rv = 0;
                 new_index = ad_var_schedule_force(index, &rv);
-                if (rv)
+                if (rv){
+                    jit_log(LogLevel::Debug,
+                            "   scheduled variable r%u, label=%s -> r%u",
+                            (uint32_t) index, jit_var_label(index),
+                            (uint32_t) new_index);
                     result = true;
+                }
             }
 
-            jit_log(LogLevel::Debug, "    scheduled 0x%llx -> 0x%llx", index,
-                    new_index);
-            jit_log(LogLevel::Debug, "    state=%u", jit_var_state(new_index));
 
             return new_index;
         }
