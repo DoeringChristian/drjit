@@ -622,6 +622,11 @@ struct FlatVariables {
      * Construct the variable index given a layout.
      * This corresponds to `add_variable_index` and `add_flat_dr_var_index`.
      *
+     * This function is also used for assignment to ad-variables.
+     * If a `prev_index` is provided, and it is an ad-variable the gradient and
+     * value of the flat variables will be applied to the ad variable,
+     * preserving the ad_idnex.
+     *
      * It returns a owning reference.
      */
     uint64_t construct_ad_index(const Layout &layout, uint32_t shrink = 0, uint64_t prev_index = 0) {
@@ -1644,8 +1649,11 @@ struct FrozenFunction {
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
         nb::object result;
         {
-            ADScopeContext ad_scope(drjit::ADScope::Isolate, 0, nullptr, -1, true);
-            
+            // Enter Isolate grad scope, so that gradients don't traverse
+            // outside of the function scope.
+            ADScopeContext ad_scope(drjit::ADScope::Isolate, 0, nullptr, -1,
+                                    true);
+
             if (!jit_flag(JitFlag::KernelFreezing)) {
                 ProfilerPhase profiler("function");
                 return func(*args, **kwargs);
