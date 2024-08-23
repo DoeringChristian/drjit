@@ -31,6 +31,18 @@ struct ProfilerPhase {
     }
 };
 
+struct ADScopeContext{
+    bool process_postponed;
+    ADScopeContext(drjit::ADScope type, size_t size, const uint64_t *indices,
+            int symbolic, bool process_postponed)
+        : process_postponed(process_postponed) {
+        ad_scope_enter(type, size, indices, symbolic);
+    }
+    ~ADScopeContext(){
+        ad_scope_leave(process_postponed);
+    }
+};
+
 static const char *doc_freeze = R"(
     
 )";
@@ -1348,15 +1360,15 @@ struct FunctionRecording {
         jit_log(LogLevel::Debug, "Evaluating output:");
         {
             ProfilerPhase profiler("evaluate input + output");
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, -1);
+            // Enter Resume scope, so we can track gradients
+            ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
+                                    false);
             deep_make_opaque(input, false);
             deep_eval(result, false);
             {
                 nb::gil_scoped_release guard;
                 jit_eval();
             }
-
-            ad_scope_leave(false);
         }
 
         // Pause recording before traversal as to not accedentally record
@@ -1369,9 +1381,10 @@ struct FunctionRecording {
         jit_log(LogLevel::Info, "Traversing output");
         {
             ProfilerPhase profiler("traverse output");
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
+            // Enter Resume scope, so we can track gradients
+            ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
+                                    false);
             out_variables.traverse(output);
-            ad_scope_leave(false);
         }
 
         if ((out_variables.variables.size() > 0 &&
@@ -1393,9 +1406,11 @@ struct FunctionRecording {
         jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
                 out_variables.variables.size());
 
+        // For catching input assignment missmatches, we asign the input and output
         {
-            // For catching input assignment missmatches, we asign the input and output
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
+            // Enter Resume scope, so we can track gradients
+            ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
+                                    false);
 
             out_variables.layout_index = 1;
             jit_log(LogLevel::Debug, "Construct:");
@@ -1404,8 +1419,6 @@ struct FunctionRecording {
             // jit_log(LogLevel::Debug, "Assign:");
             // out_variables.assign(input);
             out_variables.layout_index = 0;
-
-            ad_scope_leave(true);
         }
 
         return output;
@@ -1417,6 +1430,7 @@ struct FunctionRecording {
      */
     nb::object replay(nb::callable func, nb::list input,
                       const FlatVariables &in_variables) {
+        ProfilerPhase profiler("replay");
 
         jit_log(LogLevel::Info, "Replaying:");
         int dryrun_success;
@@ -1443,23 +1457,24 @@ struct FunctionRecording {
                 nb::raise_python_error();
             }
         }else{
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
-            ProfilerPhase profiler("replay");
+            ProfilerPhase profiler("jit replay");
             jit_record_replay(recording, in_variables.variables.data(),
                               out_variables.variables.data());
-            ad_scope_leave(true);
         }
         jit_log(LogLevel::Info, "Replaying done:");
 
-        ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
-        
-        out_variables.layout_index = 1;
-        jit_log(LogLevel::Debug, "Construct:");
-        auto result = nb::borrow<nb::list>(out_variables.construct());
-        jit_log(LogLevel::Debug, "Assign:");
-        out_variables.assign(input);
-        
-        ad_scope_leave(true);
+        // Construct Output variables
+        nb::list result;
+        {
+            // Enter Resume scope, so we can track gradients
+            ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
+                                    false);
+            out_variables.layout_index = 1;
+            jit_log(LogLevel::Debug, "Construct:");
+            result = nb::borrow<nb::list>(out_variables.construct());
+            jit_log(LogLevel::Debug, "Assign:");
+            out_variables.assign(input);
+        }
 
         // out_variables is assigned by jit_record_replay, which transfers
         // ownership to this array. Therefore, we have to drop the variables
@@ -1627,90 +1642,91 @@ struct FrozenFunction {
     }
 
     nb::object operator()(nb::args args, nb::kwargs kwargs) {
-        ad_scope_enter(drjit::ADScope::Isolate, 0, nullptr, -1);
-
-        if (!jit_flag(JitFlag::KernelFreezing)) {
-            ProfilerPhase profiler("function");
-            return func(*args, **kwargs);
-        }
-
-        nb::list input;
-        input.append(args);
-        input.append(kwargs);
-
-        FlatVariables in_variables(true);
-        {
-            ad_scope_enter(drjit::ADScope::Resume, 0, nullptr, 0);
-
-            // Evaluate input variables, forcing evaluation of undefined
-            // variables NOTE: not sure, why both are necessary
-            {
-                ProfilerPhase profiler("evaluate input");
-                deep_make_opaque(input);
-            }
-
-            ProfilerPhase profiler("traverse input");
-            // Traverse input variables
-            jit_log(LogLevel::Debug, "freeze(): Traversing input.");
-            in_variables.traverse(input);
-
-            ad_scope_leave(true);
-        }
-
-        raise_if(in_variables.backend == JitBackend::None,
-                 "freeze(): Cannot infer backend without providing input "
-                 "variable to frozen function!");
-
-        uint32_t flags = jit_flags();
-        auto key = RecordingKey(std::move(in_variables.layout), flags);
-        auto it = this->recordings.find(key);
-
         nb::object result;
-        if (it == this->recordings.end()) {
-            if (this->recordings.size() >= 1) {
-                jit_log(LogLevel::Info,
-                        "Function input missmatch! Function will be retraced.");
-                key.log_diff(&prev_key, LogLevel::Debug);
+        {
+            ADScopeContext ad_scope(drjit::ADScope::Isolate, 0, nullptr, -1, true);
+            
+            if (!jit_flag(JitFlag::KernelFreezing)) {
+                ProfilerPhase profiler("function");
+                return func(*args, **kwargs);
             }
-            // FunctionRecording recording;
-            auto recording = std::make_unique<FunctionRecording>();
 
-            try {
-                result = recording->record(func, input, in_variables);
-            } catch (nb::python_error &e) {
-                in_variables.drop_variables();
-                jit_record_abort(in_variables.backend);
-                jit_set_flag(JitFlag::KernelFreezing, true);
-                nb::raise_from(e, PyExc_RuntimeError,
-                               "record(): error encountered while recording a "
-                               "function (see above).");
-                
-            } catch (const std::exception &e) {
-                in_variables.drop_variables();
-                jit_record_abort(in_variables.backend);
-                jit_set_flag(JitFlag::KernelFreezing, true);
+            nb::list input;
+            input.append(args);
+            input.append(kwargs);
 
-                nb::chain_error(PyExc_RuntimeError, "record(): %s", e.what());
-                nb::raise_python_error();
-            };
-
-            in_variables.drop_variables();
-
-            this->prev_key = key;
-            this->recordings.insert({std::move(key), std::move(recording)});
-
-        } else {
-            // Drop references to variables
-
-            FunctionRecording *recording = it.value().get();
-
+            FlatVariables in_variables(true);
+            // Evaluate and traverse input variables (args and kwargs)
             {
-                result = recording->replay(func, input, in_variables);
+                // Enter Resume scope, so we can track gradients
+                ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, 0,
+                                        true);
+                // Evaluate input variables, forcing evaluation of undefined
+                // variables
+                {
+                    ProfilerPhase profiler("evaluate input");
+                    deep_make_opaque(input);
+                }
+
+                // Traverse input variables
+                ProfilerPhase profiler("traverse input");
+                jit_log(LogLevel::Debug, "freeze(): Traversing input.");
+                in_variables.traverse(input);
             }
 
-            in_variables.drop_variables();
+            raise_if(in_variables.backend == JitBackend::None,
+                     "freeze(): Cannot infer backend without providing input "
+                     "variable to frozen function!");
+
+            uint32_t flags = jit_flags();
+            auto key = RecordingKey(std::move(in_variables.layout), flags);
+            auto it = this->recordings.find(key);
+
+            if (it == this->recordings.end()) {
+                if (this->recordings.size() >= 1) {
+                    jit_log(LogLevel::Info,
+                            "Function input missmatch! Function will be retraced.");
+                    key.log_diff(&prev_key, LogLevel::Debug);
+                }
+                // FunctionRecording recording;
+                auto recording = std::make_unique<FunctionRecording>();
+
+                try {
+                    result = recording->record(func, input, in_variables);
+                } catch (nb::python_error &e) {
+                    in_variables.drop_variables();
+                    jit_record_abort(in_variables.backend);
+                    jit_set_flag(JitFlag::KernelFreezing, true);
+                    nb::raise_from(e, PyExc_RuntimeError,
+                                   "record(): error encountered while recording a "
+                                   "function (see above).");
+                    
+                } catch (const std::exception &e) {
+                    in_variables.drop_variables();
+                    jit_record_abort(in_variables.backend);
+                    jit_set_flag(JitFlag::KernelFreezing, true);
+
+                    nb::chain_error(PyExc_RuntimeError, "record(): %s", e.what());
+                    nb::raise_python_error();
+                };
+
+                in_variables.drop_variables();
+
+                this->prev_key = key;
+                this->recordings.insert({std::move(key), std::move(recording)});
+
+            } else {
+                // Drop references to variables
+
+                FunctionRecording *recording = it.value().get();
+
+                {
+                    result = recording->replay(func, input, in_variables);
+                }
+
+                in_variables.drop_variables();
+            }
         }
-        ad_scope_leave(true);
         // WARN: should track which variables where enqueud
         ad_traverse(drjit::ADMode::Backward, (uint32_t)drjit::ADFlag::ClearVertices);
         return result;
