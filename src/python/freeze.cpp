@@ -2,6 +2,7 @@
 #include "autodiff.h"
 #include "base.h"
 #include "common.h"
+#include "drjit-core/hash.h"
 #include "drjit-core/jit.h"
 #include "drjit/array_router.h"
 #include "drjit/autodiff.h"
@@ -16,6 +17,7 @@
 #include "shape.h"
 #include "tupleobject.h"
 #include <tsl/robin_map.h>
+#include <tsl/robin_set.h>
 #include <vector>
 
 struct ProfilerPhase {
@@ -51,6 +53,7 @@ enum class LayoutFlag : uint32_t {
     SingletonArray = (1 << 0),
     Unaligned = (1 << 1),
     GradEnabled = (1 << 2),
+    Postponed = (1 << 3),
 };
 
 /// Stores information about python objects, such as their type, their number of
@@ -141,6 +144,11 @@ struct Layout {
         }
         return true;
     }
+};
+
+// Additional context required when traversing the inputs
+struct TraverseContext{
+    const tsl::robin_set<uint32_t, UInt32Hasher> *postponed = nullptr;
 };
 
 struct FlatVariables {
@@ -242,7 +250,7 @@ struct FlatVariables {
      * Add jit variable by index.
      * Takes an optional type.
      */
-    void add_var_jit_index(uint32_t index, nb::handle tp = nb::none()) {
+    void add_var_jit_index(uint32_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
         VarInfo info = jit_set_backend(index);
         JitBackend var_backend = info.backend;
 
@@ -305,34 +313,50 @@ struct FlatVariables {
      * Add an ad variable by it's index.
      * Takes an optional type.
      */
-    void add_var_ad_index(uint64_t index, nb::handle tp = nb::none()) {
+    void add_var_ad_index(uint64_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
         int grad_enabled = ad_grad_enabled(index);
         jit_log(LogLevel::Debug,
                 "traverse(): adding var (a%u, r%u)",
                 (uint32_t)(index >> 32), (uint32_t)index, grad_enabled);
         if (grad_enabled) {
+            uint32_t ad_index = (uint32_t)(index >> 32);
+            
             jit_log(LogLevel::Debug, " => collecting ad var");
             Layout layout;
             layout.type = nb::borrow<nb::type_object>(tp);
             layout.num = 2;
-            layout.flags |= (uint32_t)LayoutFlag::GradEnabled;
             layout.vt = jit_var_type(index);
+            
+            // Set flags
+            layout.flags |= (uint32_t)LayoutFlag::GradEnabled;
+            // If the edge with this node as it's target has been postponed by
+            // the isolate gradient scope, it has been enqueued and we mark the
+            // ad variable as such.
+            if(ctx.postponed && ctx.postponed->contains(ad_index)){
+                layout.flags |= (uint32_t)LayoutFlag::Postponed;
+                jit_log(LogLevel::Debug, "traverse(): found postponed ad_variable a%u", ad_index);
+            }else
+                jit_log(LogLevel::Debug,
+                        "traverse(): found ad variable a%u that has not been "
+                        "postponed",
+                        ad_index);
+            
             this->layout.push_back(layout);
 
-            add_var_jit_index(index, tp);
+            add_var_jit_index(index, ctx, tp);
             uint32_t grad = ad_grad(index);
-            add_var_jit_index(grad, tp);
+            add_var_jit_index(grad, ctx, tp);
             jit_var_dec_ref(grad);
         } else {
             jit_log(LogLevel::Debug, " => collecting jit var");
-            add_var_jit_index(index, tp);
+            add_var_jit_index(index, ctx, tp);
         }
     }
 
     /**
      * Add an ad attached variable from it's nanobind handle.
      */
-    void add_var_ad(nb::handle h) {
+    void add_var_ad(nb::handle h, TraverseContext &ctx) {
         auto s = supp(h.type());
 
         raise_if(s.index == nullptr, "freeze(): ArraySupplement index function "
@@ -340,13 +364,13 @@ struct FlatVariables {
 
         uint64_t index = s.index(inst_ptr(h));
 
-        this->add_var_ad_index(index, h.type());
+        this->add_var_ad_index(index, ctx, h.type());
     }
 
     /**
      * Traverse a c++ tree using it's `traverse_1_cb_ro` callback.
      */
-    void traverse_cb(const drjit::TraversableBase *traversable,
+    void traverse_cb(const drjit::TraversableBase *traversable, TraverseContext &ctx,
                      nb::object type = nb::none()) {
         Layout layout;
         layout.type = nb::borrow<nb::type_object>(type);
@@ -358,15 +382,16 @@ struct FlatVariables {
         struct Payload {
             FlatVariables *flat_vars;
             uint32_t num_fields;
+            TraverseContext *ctx;
         };
-        Payload payload{this, 0};
+        Payload payload{this, 0, &ctx};
         traversable->traverse_1_cb_ro(
             (void *)&payload, [](void *p, uint64_t index) {
                 if(!index)
                     return;
                 Payload *payload = (Payload *)p;
                 payload->num_fields++;
-                payload->flat_vars->add_var_ad_index(index);
+                payload->flat_vars->add_var_ad_index(index, *payload->ctx);
             });
 
         this->layout[layout_index].num = payload.num_fields;
@@ -375,7 +400,7 @@ struct FlatVariables {
     /**
      * Traverse a polymorphic variable, and it's subtypes.
      */
-    void add_var_class(nb::handle h) {
+    void add_var_class(nb::handle h, TraverseContext &ctx) {
         const ArraySupplement &s = supp(h.type());
 
         jit_log(LogLevel::Debug,
@@ -383,7 +408,7 @@ struct FlatVariables {
 
         // Add the base type (hopefully)
         size_t layout_index = this->layout.size();
-        add_var_ad(h);
+        add_var_ad(h, ctx);
 
         JitBackend backend = (JitBackend)s.backend;
         nb::str domain = nb::borrow<nb::str>(nb::getattr(h.type(), "Domain"));
@@ -409,9 +434,9 @@ struct FlatVariables {
 
             if (inst_obj.ptr()) {
                 fields.push_back(nb::borrow(inst_obj.type()));
-                traverse(inst_obj);
+                traverse(inst_obj, ctx);
             } else if (traversable) {
-                traverse_cb(traversable);
+                traverse_cb(traversable, ctx);
             } else {
                 nb::raise("Could not traverse non-python sub-type!");
             }
@@ -421,16 +446,16 @@ struct FlatVariables {
         this->layout[layout_index].fields = std::move(fields);
     }
 
-    void add_dr_var(nb::handle h) {
+    void add_dr_var(nb::handle h, TraverseContext &ctx) {
         nb::handle tp = h.type();
 
         auto s = supp(h.type());
 
         // Handle class var
         if (s.is_class) {
-            add_var_class(h);
+            add_var_class(h, ctx);
         } else {
-            add_var_ad(h);
+            add_var_ad(h, ctx);
         }
     }
 
@@ -446,7 +471,7 @@ struct FlatVariables {
      * Therefore, the layout can be used as an identifier to the recording of
      * the frozen function.
      */
-    void traverse(nb::handle h) {
+    void traverse(nb::handle h, TraverseContext &ctx) {
         nb::handle tp = h.type();
 
         nb::print(tp);
@@ -464,7 +489,7 @@ struct FlatVariables {
                     layout.num = width(array);
                     this->layout.push_back(layout);
 
-                    traverse(nb::steal(array));
+                    traverse(nb::steal(array), ctx);
                 } else if (s.ndim != 1) {
                     Py_ssize_t len = s.shape[0];
                     if (len == DRJIT_DYNAMIC)
@@ -476,9 +501,9 @@ struct FlatVariables {
                     this->layout.push_back(layout);
 
                     for (Py_ssize_t i = 0; i < len; ++i)
-                        traverse(nb::steal(s.item(h.ptr(), i)));
+                        traverse(nb::steal(s.item(h.ptr(), i)), ctx);
                 } else {
-                    add_dr_var(h);
+                    add_dr_var(h, ctx);
                 }
             } else if (tp.is(&PyTuple_Type)) {
                 nb::tuple tuple = nb::borrow<nb::tuple>(h);
@@ -489,7 +514,7 @@ struct FlatVariables {
                 this->layout.push_back(layout);
 
                 for (nb::handle h2 : tuple) {
-                    traverse(h2);
+                    traverse(h2, ctx);
                 }
             } else if (tp.is(&PyList_Type)) {
                 nb::list list = nb::borrow<nb::list>(h);
@@ -500,7 +525,7 @@ struct FlatVariables {
                 this->layout.push_back(layout);
 
                 for (nb::handle h2 : list) {
-                    traverse(h2);
+                    traverse(h2, ctx);
                 }
             } else if (tp.is(&PyDict_Type)) {
                 nb::dict dict = nb::borrow<nb::dict>(h);
@@ -515,7 +540,7 @@ struct FlatVariables {
                 this->layout.push_back(layout);
 
                 for (auto [k, v] : dict) {
-                    traverse(v);
+                    traverse(v, ctx);
                 }
             } else if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()) {
 
@@ -529,7 +554,7 @@ struct FlatVariables {
                 this->layout.push_back(layout);
 
                 for (auto [k, v] : ds) {
-                    traverse(nb::getattr(h, k));
+                    traverse(nb::getattr(h, k), ctx);
                 }
             } else if (nb::object df = get_dataclass_fields(tp);
                        df.is_valid()) {
@@ -545,7 +570,7 @@ struct FlatVariables {
 
                 for (nb::handle field : df) {
                     nb::object k = field.attr(DR_STR(name));
-                    traverse(nb::getattr(h, k));
+                    traverse(nb::getattr(h, k), ctx);
                 }
             } else if (nb::object cb = get_traverse_cb_ro(tp); cb.is_valid()) {
                 Layout layout;
@@ -559,7 +584,7 @@ struct FlatVariables {
                        if (!index)
                            return;
                        num_fileds++;
-                       this->add_var_ad_index(index, nb::none());
+                       this->add_var_ad_index(index, ctx, nb::none());
                    }));
 
                 // Update layout number of fields
@@ -633,6 +658,8 @@ struct FlatVariables {
         jit_log(LogLevel::Debug, "construct(): ad index");
         uint64_t index;
         if ((layout.flags & (uint32_t)LayoutFlag::GradEnabled) != 0) {
+            bool postponed = (layout.flags & (uint32_t)LayoutFlag::Postponed);
+                
             Layout &val_layout = this->layout[layout_index++];
             uint32_t val = construct_jit_index(val_layout);
 
@@ -646,7 +673,10 @@ struct FlatVariables {
                 grad = new_grad;
             }
 
-            uint32_t ad_index = (uint32_t)(prev_index >> 32);
+            // If the prev_index variable is provided we assign the new value
+            // and gradient to the ad variable of that index instead of creating
+            // a new one.
+            uint32_t ad_index = (uint32_t) (prev_index >> 32);
             if(ad_index){
                 index = (((uint64_t) ad_index) << 32) | ((uint64_t) val);
                 ad_var_inc_ref(index);
@@ -656,12 +686,15 @@ struct FlatVariables {
             jit_log(LogLevel::Debug, " -> ad_var r%zu", index);
             jit_var_dec_ref(val);
 
+            // Equivalent to set_grad
             ad_clear_grad(index);
             ad_accum_grad(index, grad);
             jit_var_dec_ref(grad);
 
-            if(ad_index){
-                // WARN: should track which variables where enqueud
+            // Variables, that have been postponed by the isolate gradient scope
+            // will be enqueued, which propagates their gradeint to previous
+            // functions.
+            if (ad_index && postponed) {
                 ad_enqueue(drjit::ADMode::Backward, index);
             }
         } else {
@@ -1383,13 +1416,32 @@ struct FunctionRecording {
         // TODO: validate, that gradients wheren't enabled for inputs inside the
         // frozen function.
 
+        // Collect nodes, that have been postponed by the `Isolate` scope in a
+        // hash set.
+        // These are the targets of postponed edges, as the isolate gradient
+        // scope only handles backward mode differentiation.
+        // If they are, then we have to enqueue them when replaying the
+        // recording.
+        tsl::robin_set<uint32_t, UInt32Hasher> postponed;
+        {
+            drjit::vector<uint32_t> postponed_vec;
+            ad_scope_postponed(postponed_vec);
+            for(uint32_t index : postponed_vec)
+            postponed.insert(index);
+
+        }
+            
+
         jit_log(LogLevel::Info, "Traversing output");
         {
             ProfilerPhase profiler("traverse output");
             // Enter Resume scope, so we can track gradients
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
                                     false);
-            out_variables.traverse(output);
+            
+            TraverseContext ctx;
+            ctx.postponed = &postponed;
+            out_variables.traverse(output, ctx);
         }
 
         if ((out_variables.variables.size() > 0 &&
@@ -1679,7 +1731,8 @@ struct FrozenFunction {
                 // Traverse input variables
                 ProfilerPhase profiler("traverse input");
                 jit_log(LogLevel::Debug, "freeze(): Traversing input.");
-                in_variables.traverse(input);
+                TraverseContext ctx;
+                in_variables.traverse(input, ctx);
             }
 
             raise_if(in_variables.backend == JitBackend::None,
