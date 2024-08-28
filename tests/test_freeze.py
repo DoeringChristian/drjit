@@ -2272,9 +2272,9 @@ def test40_grad_postponed_part(t):
     dr.set_flag(dr.JitFlag.ReuseIndices, False)
 
     def f(x):
-        return x * 2
+        return x * x * 2
     def g(y):
-        return y * 3
+        return y * y * 3
 
     def func(y1, y2):
         z1 = g(y1)
@@ -2285,12 +2285,12 @@ def test40_grad_postponed_part(t):
 
     def run(i, name, func):
         print(f"{name}:")
-        x1 = dr.arange(t, 3)
+        x1 = dr.arange(t, 3) + i
         dr.make_opaque(x1)
         dr.enable_grad(x1)
         y1 = f(x1)
         
-        x2 = dr.arange(t, 3)
+        x2 = dr.arange(t, 3) + i
         dr.make_opaque(x2)
         dr.enable_grad(x2)
         dr.set_grad(x2, 2)
