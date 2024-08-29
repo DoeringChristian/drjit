@@ -480,6 +480,33 @@ def test18_pointers(t):
 
     print(y)
 
+@pytest.test_arrays("uint32, jit, shape=(*)")
+def test19_gather_memcpy(t):
+    """
+    The gather operation might be elided in favor of a memcpy 
+    if the index is a literal of size 1.
+    The source of the memcpy is however not known to the recording
+    mechansim as it might index into the source array.
+    """
+
+    def func(x, idx: int):
+        idx = t(idx)
+        return dr.gather(t, x, idx)
+
+    frozen = dr.freeze(func)
+
+    for i in range(3):
+        x = dr.arange(t, i, 3 + i)
+        dr.make_opaque(x)
+        ref = func(x, 2)
+        result = frozen(x, 2)
+
+        print(f"{result=}")
+
+        assert dr.all(ref == result)
+
+    assert frozen.n_recordings == 1
+
 
 def get_pkg(t):
     with dr.detail.scoped_rtld_deepbind():
