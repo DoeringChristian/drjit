@@ -204,7 +204,7 @@ struct FlatVariables {
 
         if (it == this->index_to_slot.end()) {
             uint32_t slot = this->variables.size();
-            jit_log(LogLevel::Info, "    aliasing var(%u) -> flat_var(%u)",
+            jit_log(LogLevel::Info, "    aliasing var r%u -> slot s%u",
                     variable_index, slot);
 
             // NOTE: an alternative to borrowing here would be to make `refcount
@@ -219,7 +219,7 @@ struct FlatVariables {
         } else {
             uint32_t slot = it.value();
             jit_log(LogLevel::Info,
-                    "collect(): Found aliasing condition var(%u) -> slot(%u)",
+                    "collect(): Found aliasing condition var r%u -> slot s%u",
                     variable_index, slot);
             return slot;
         }
@@ -263,7 +263,7 @@ struct FlatVariables {
         }
 
         jit_log(LogLevel::Info,
-                "collect(): collecting var(%u, backend=%u, type=%u)", index,
+                "collect(): collecting r%u, backend=%u, type=%u", index,
                 var_backend, jit_var_type(index));
 
         if (jit_var_type(index) == VarType::Pointer) {
@@ -283,12 +283,14 @@ struct FlatVariables {
         layout.size_index = this->add_size(jit_var_size(index));
 
         if (vs == VarState::Literal) {
-            jit_log(LogLevel::Info, "    vs=Literal");
+            jit_log(LogLevel::Debug, "    vs=Literal");
             jit_var_read(index, 0, &layout.literal);
             // Store size in index variable, as this is not used for literals
             layout.index = jit_var_size(index);
         } else if (vs == VarState::Evaluated) {
-            jit_log(LogLevel::Info, "    vs=%s", jit_var_kind_name(index));
+            void *data = nullptr;
+            jit_var_data(index, &data);
+            jit_log(LogLevel::Debug, "    vs=%s, data=%p", jit_var_kind_name(index), data);
             layout.index = this->add_variable_index(index);
             // bool singleton_array = jit_var_size(index) == 1;
             bool unaligned = jit_var_is_unaligned(index);
@@ -1527,10 +1529,14 @@ struct FunctionRecording {
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
                                     false);
             out_variables.layout_index = 1;
-            jit_log(LogLevel::Debug, "Construct:");
-            result = nb::borrow<nb::list>(out_variables.construct());
-            jit_log(LogLevel::Debug, "Assign:");
-            out_variables.assign(input);
+            {
+                ProfilerPhase profiler("construct output");
+                result = nb::borrow<nb::list>(out_variables.construct());
+            }
+            {
+                ProfilerPhase profiler("assign input");
+                out_variables.assign(input);
+            }
         }
 
         // out_variables is assigned by jit_record_replay, which transfers
