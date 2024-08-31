@@ -847,6 +847,29 @@ struct FlatVariables {
     }
 
     /**
+     * Helper function, used to assign a callback variable.
+     */
+    uint64_t assign_cb_internal(uint64_t index, std::vector<uint64_t> &tmp){
+        if(!index)
+            return index;
+        jit_log(LogLevel::Debug, "Travers node");
+        Layout &layout = this->layout[layout_index++];
+
+
+        uint64_t new_index = this->construct_ad_index(layout, 0, index);
+
+        if (layout.vt != (VarType)jit_var_type(index))
+            jit_fail("VarType missmatch %u != %u while assigning (a%u, r%u) -> (a%u, r%u)!",
+                     (uint32_t)layout.vt,
+                     (uint32_t)jit_var_type(index),
+                     (uint32_t)(index >> 32), (uint32_t)index, (uint32_t)(new_index >> 32), (uint32_t)new_index
+                     );
+    
+        tmp.push_back(new_index);
+        return new_index;
+    }
+
+    /**
      * Assigns variables using it's `traverse_cb_rw` callback.
      * This corresponds to `traverse_cb`.
      */
@@ -858,20 +881,8 @@ struct FlatVariables {
         Payload payload{this, std::vector<uint64_t>()};
         traversable->traverse_1_cb_rw((void *) &payload, [](void *p,
                                                             uint64_t index) {
-            if (!index)
-                return index;
-            Payload *payload = (Payload *)p;
-
-            Layout &layout =
-                payload->flat_vars->layout[payload->flat_vars->layout_index++];
-
-            if (layout.vt != jit_var_type(index))
-                jit_fail("VarType missmatch %u != %u!", (uint32_t)layout.vt,
-                         (uint32_t)jit_var_type(index));
-
-            uint64_t new_index = payload->flat_vars->construct_ad_index(layout, 0, index);
-            payload->tmp.push_back(new_index);
-            return new_index;
+            Payload *payload = (Payload *) p;
+            return payload->flat_vars->assign_cb_internal(index, payload->tmp);
         });
         for (uint64_t index : payload.tmp)
             ad_var_dec_ref(index);
@@ -1005,23 +1016,7 @@ struct FlatVariables {
             } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
                 std::vector<uint64_t> tmp;
                 cb(dst, nb::cpp_function([&](uint64_t index) {
-                    if(!index)
-                        return index;
-                    jit_log(LogLevel::Debug, "Travers node");
-                    Layout &layout = this->layout[layout_index++];
-
-
-                    uint64_t new_index = this->construct_ad_index(layout, 0, index);
-
-                    if (layout.vt != (VarType)jit_var_type(index))
-                        jit_fail("VarType missmatch %u != %u while assigning (a%u, r%u) -> (a%u, r%u)!",
-                                 (uint32_t)layout.vt,
-                                 (uint32_t)jit_var_type(index),
-                                 (uint32_t)(index >> 32), (uint32_t)index, (uint32_t)(new_index >> 32), (uint32_t)new_index
-                                 );
-                
-                    tmp.push_back(new_index);
-                    return new_index;
+                    return assign_cb_internal(index, tmp);
                 }));
                 for (uint32_t index : tmp)
                     ad_var_dec_ref(index);
