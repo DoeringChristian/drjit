@@ -148,6 +148,7 @@ struct Layout {
 
 // Additional context required when traversing the inputs
 struct TraverseContext{
+    /// set of postponed ad nodes, used to mark inputs to functions.
     const tsl::robin_set<uint32_t, UInt32Hasher> *postponed = nullptr;
 };
 
@@ -247,10 +248,9 @@ struct FlatVariables {
     }
 
     /**
-     * Add jit variable by index.
-     * Takes an optional type.
+     * Traverse the jit index, given an optional type.
      */
-    void add_var_jit_index(uint32_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
+    void traverse_jit_index(uint32_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
         VarInfo info = jit_set_backend(index);
         JitBackend var_backend = info.backend;
 
@@ -315,7 +315,7 @@ struct FlatVariables {
      * Add an ad variable by it's index.
      * Takes an optional type.
      */
-    void add_var_ad_index(uint64_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
+    void traverse_ad_index(uint64_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
         int grad_enabled = ad_grad_enabled(index);
         jit_log(LogLevel::Debug,
                 "traverse(): adding var (a%u, r%u)",
@@ -345,20 +345,20 @@ struct FlatVariables {
             
             this->layout.push_back(layout);
 
-            add_var_jit_index(index, ctx, tp);
+            traverse_jit_index(index, ctx, tp);
             uint32_t grad = ad_grad(index);
-            add_var_jit_index(grad, ctx, tp);
+            traverse_jit_index(grad, ctx, tp);
             jit_var_dec_ref(grad);
         } else {
             jit_log(LogLevel::Debug, " => collecting jit var");
-            add_var_jit_index(index, ctx, tp);
+            traverse_jit_index(index, ctx, tp);
         }
     }
 
     /**
-     * Add an ad attached variable from it's nanobind handle.
+     * Wrapper arround traverse_ad_index for a variable handle.
      */
-    void add_var_ad(nb::handle h, TraverseContext &ctx) {
+    void traverse_ad_var(nb::handle h, TraverseContext &ctx) {
         auto s = supp(h.type());
 
         raise_if(s.index == nullptr, "freeze(): ArraySupplement index function "
@@ -366,7 +366,7 @@ struct FlatVariables {
 
         uint64_t index = s.index(inst_ptr(h));
 
-        this->add_var_ad_index(index, ctx, h.type());
+        this->traverse_ad_index(index, ctx, h.type());
     }
 
     /**
@@ -393,7 +393,7 @@ struct FlatVariables {
                     return;
                 Payload *payload = (Payload *)p;
                 payload->num_fields++;
-                payload->flat_vars->add_var_ad_index(index, *payload->ctx);
+                payload->flat_vars->traverse_ad_index(index, *payload->ctx);
             });
 
         this->layout[layout_index].num = payload.num_fields;
@@ -402,7 +402,7 @@ struct FlatVariables {
     /**
      * Traverse a polymorphic variable, and it's subtypes.
      */
-    void add_var_class(nb::handle h, TraverseContext &ctx) {
+    void traverse_class_var(nb::handle h, TraverseContext &ctx) {
         const ArraySupplement &s = supp(h.type());
 
         jit_log(LogLevel::Debug,
@@ -410,7 +410,7 @@ struct FlatVariables {
 
         // Add the base type (hopefully)
         size_t layout_index = this->layout.size();
-        add_var_ad(h, ctx);
+        traverse_ad_var(h, ctx);
 
         JitBackend backend = (JitBackend)s.backend;
         nb::str domain = nb::borrow<nb::str>(nb::getattr(h.type(), "Domain"));
@@ -448,16 +448,20 @@ struct FlatVariables {
         this->layout[layout_index].fields = std::move(fields);
     }
 
-    void add_dr_var(nb::handle h, TraverseContext &ctx) {
+    /**
+     * Traverse andy drjit variable.
+     * It can be polimorphic or an ad variable.
+     */
+    void traverse_dr_var(nb::handle h, TraverseContext &ctx) {
         nb::handle tp = h.type();
 
         auto s = supp(h.type());
 
         // Handle class var
         if (s.is_class) {
-            add_var_class(h, ctx);
+            traverse_class_var(h, ctx);
         } else {
-            add_var_ad(h, ctx);
+            traverse_ad_var(h, ctx);
         }
     }
 
@@ -466,7 +470,7 @@ struct FlatVariables {
      * `layout` vector.
      *
      * When hitting a drjit primitive type, it calls the
-     * `add_dr_var` method, which will add their indices to the `flat_variables`
+     * `traverse_dr_var` method, which will add their indices to the `flat_variables`
      * vector.
      * The collect method will also record metadata about the drjit variable in
      * the layout.
@@ -505,7 +509,7 @@ struct FlatVariables {
                     for (Py_ssize_t i = 0; i < len; ++i)
                         traverse(nb::steal(s.item(h.ptr(), i)), ctx);
                 } else {
-                    add_dr_var(h, ctx);
+                    traverse_dr_var(h, ctx);
                 }
             } else if (tp.is(&PyTuple_Type)) {
                 nb::tuple tuple = nb::borrow<nb::tuple>(h);
@@ -586,7 +590,7 @@ struct FlatVariables {
                        if (!index)
                            return;
                        num_fileds++;
-                       this->add_var_ad_index(index, ctx, nb::none());
+                       this->traverse_ad_index(index, ctx, nb::none());
                    }));
 
                 // Update layout number of fields
@@ -627,6 +631,7 @@ struct FlatVariables {
 
     /**
      * Construct a variable, given it's layout.
+     * This is the counterpart to `traverse_jit_index`.
      */
     uint32_t construct_jit_index(const Layout &layout) {
         if (layout.vs == VarState::Literal) {
@@ -646,8 +651,8 @@ struct FlatVariables {
     }
 
     /**
-     * Construct the variable index given a layout.
-     * This corresponds to `add_variable_index` and `add_flat_dr_var_index`.
+     * Construct/assign the variable index given a layout.
+     * This corresponds to `traverse_ad_index`>
      *
      * This function is also used for assignment to ad-variables.
      * If a `prev_index` is provided, and it is an ad-variable the gradient and
@@ -708,7 +713,11 @@ struct FlatVariables {
         return index;
     }
 
-    nb::object construct_flat_dr_var(const Layout &layout,
+    /**
+     * Construct an ad variable given it's layout.
+     * This corresponds to `traverse_ad_var`
+     */
+    nb::object construct_ad_var(const Layout &layout,
                                      uint32_t shrink = 0) {
         uint64_t index = construct_ad_index(layout, shrink);
 
@@ -723,50 +732,17 @@ struct FlatVariables {
         return result;
     }
 
-    nb::object construct_dr_class_var(const Layout &layout) {
-        const ArraySupplement &s = supp(layout.type);
-
-        JitBackend backend = (JitBackend)s.backend;
-        nb::str domain =
-            nb::borrow<nb::str>(nb::getattr(layout.type, "Domain"));
-
-        uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
-        if (id_bound != layout.num) {
-            jit_fail("Number of sub-types registered with backend changed "
-                     "during recording!");
-        }
-
-        nb::object result = construct_flat_dr_var(layout);
-
-        for (uint32_t id = 0; id < id_bound; ++id) {
-            void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
-            if (!ptr)
-                continue;
-
-            // WARN: very unsafe cast!
-            nb::intrusive_base *base = (nb::intrusive_base *)ptr;
-            drjit::TraversableBase *traversable =
-                dynamic_cast<drjit::TraversableBase *>(base);
-            nb::handle inst_obj = base->self_py();
-
-            // TODO: what should we acctually do in this case?
-            if (inst_obj.ptr()) {
-                construct();
-            } else {
-                nb::raise("Could not traverse non-python sub-type!");
-            }
-        }
-
-        return result;
-    }
-
+    /**
+     * Construct a drjit variable.
+     * Corresponds to `traverse_dr_var`.
+     */
     nb::object construct_dr_var(const Layout &layout, uint32_t shrink = 0) {
         const ArraySupplement &s = supp(layout.type);
 
         if (s.is_class) {
             nb::raise("Tried to construct a polymorphic drjit variable");
         } else {
-            return construct_flat_dr_var(layout, shrink);
+            return construct_ad_var(layout, shrink);
         }
     }
 
@@ -839,28 +815,41 @@ struct FlatVariables {
                 dict[k] = construct();
             }
             return layout.type(**dict);
-        } else if (nb::object cb = get_traverse_cb_rw(layout.type);
-                   cb.is_valid()) {
-            nb::object result = layout.type();
-            std::vector<uint64_t> tmp;
-
-            cb(result, nb::cpp_function([&](uint64_t) {
-                   Layout &layout = this->layout[layout_index++];
-                   uint64_t new_index = construct_ad_index(layout);
-                   tmp.push_back(new_index);
-                   return new_index;
-               }));
-
-            for (uint32_t index : tmp)
-                ad_var_dec_ref(index);
-
-            return result;
-
         } else {
+            if(layout.py_object.is_none()){
+                nb::raise("Tried to construct a variable that is not constructable!");
+            }
             return layout.py_object;
         }
     }
 
+    /**
+     * Assigns an ad variable.
+     * Corresponds to `traverse_ad_var`.
+     * This uses `construct_ad_index` to either construct a new ad variable or
+     * assign the value and gradient to an already existing one.
+     */
+    void assign_ad_var(Layout &layout, nb::handle dst) {
+        const ArraySupplement &s = supp(layout.type);
+
+        uint64_t index;
+        if(s.index){
+            index = construct_ad_index(layout, 0, s.index(inst_ptr(dst)));
+        } else
+            index = construct_ad_index(layout);
+
+        s.reset_index(index, inst_ptr(dst));
+        jit_log(LogLevel::Debug,
+                "index=%zu, grad_enabled=%u, ad_grad_enabled=%u", index,
+                grad_enabled(dst), ad_grad_enabled(index));
+
+        ad_var_dec_ref(index);
+    }
+
+    /**
+     * Assigns variables using it's `traverse_cb_rw` callback.
+     * This corresponds to `traverse_cb`.
+     */
     void assign_cb(drjit::TraversableBase *traversable) {
         struct Payload {
             FlatVariables *flat_vars;
@@ -888,23 +877,12 @@ struct FlatVariables {
             ad_var_dec_ref(index);
     }
 
-    void assign_flat_dr_var(Layout &layout, nb::handle dst) {
-        const ArraySupplement &s = supp(layout.type);
-
-        uint64_t index;
-        if(s.index){
-            index = construct_ad_index(layout, 0, s.index(inst_ptr(dst)));
-        } else
-            index = construct_ad_index(layout);
-
-        s.reset_index(index, inst_ptr(dst));
-        jit_log(LogLevel::Debug,
-                "index=%zu, grad_enabled=%u, ad_grad_enabled=%u", index,
-                grad_enabled(dst), ad_grad_enabled(index));
-
-        ad_var_dec_ref(index);
-    }
-    void assign_dr_class(Layout &layout, nb::handle dst) {
+    
+    /**
+     * Assign a polymorphic variable and it's subtypes.
+     * Corresponds to `traverse_class_var`
+     */
+    void assign_class_var(Layout &layout, nb::handle dst) {
         const ArraySupplement &s = supp(layout.type);
 
         JitBackend backend = (JitBackend)s.backend;
@@ -917,7 +895,7 @@ struct FlatVariables {
                      "during recording!");
         }
 
-        assign_flat_dr_var(layout, dst);
+        assign_ad_var(layout, dst);
 
         for (uint32_t id = 0; id < id_bound; ++id) {
             void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
@@ -940,12 +918,16 @@ struct FlatVariables {
         }
     }
 
+    /**
+     * Assign a drjit variable.
+     * Corresponds to `traverse_dr_var`.
+     */
     void assign_dr_var(Layout &layout, nb::handle dst) {
         const ArraySupplement &s = supp(layout.type);
         if (s.is_class)
-            assign_dr_class(layout, dst);
+            assign_class_var(layout, dst);
         else
-            assign_flat_dr_var(layout, dst);
+            assign_ad_var(layout, dst);
     }
 
     /**
