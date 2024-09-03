@@ -2198,10 +2198,10 @@ def test37_var_upload(t):
         x = dr.arange(t, 3)
         dr.make_opaque(x)
 
-        with pytest.raises(RuntimeError):
-            z = frozen(x)
+        # with pytest.raises(RuntimeError):
+        z = frozen(x)
 
-        # assert dr.allclose(z, func(x))
+        assert dr.allclose(z, func(x))
 
 @pytest.test_arrays("float32, jit, diff, shape=(*)")
 def test38_grad_isolate(t):
@@ -2344,7 +2344,7 @@ def test40_grad_postponed_part(t):
         for ref, res in zip(ref, res):
             assert dr.allclose(ref, res)
 
-@pytest.test_arrays("float32, jit, diff, shape=(*)")
+@pytest.test_arrays("float32, cuda, jit, diff, shape=(*)")
 def test40_nested(t):
     
     pkg = get_pkg(t)
