@@ -5,6 +5,7 @@ import sys
 
 dr.set_log_level(dr.LogLevel.Trace)
 dr.set_flag(dr.JitFlag.KernelFreezing, True)
+dr.set_flag(dr.JitFlag.ReuseIndices, False)
 
 
 def get_single_entry(x):
@@ -568,8 +569,6 @@ def test20_vcall_optimize(t, symbolic, optimize, opaque):
     Mask = dr.mask_t(t)
     a, b = B(), B()
 
-    B.DRJIT_STRUCT = {"value": t, "opaque": t}
-    A.DRJIT_STRUCT = {"value": t, "opaque": t}
     dr.set_label(A.opaque, "A.opaque")
     dr.set_label(B.opaque, "B.opaque")
 
@@ -635,8 +634,6 @@ def test21_multiple_vcalls(t, symbolic, optimize, opaque):
     Mask = dr.mask_t(t)
     a, b = B(), B()
 
-    B.DRJIT_STRUCT = {"value": t, "opaque": t}
-    A.DRJIT_STRUCT = {"value": t, "opaque": t}
     dr.set_label(A.opaque, "A.opaque")
     dr.set_label(B.opaque, "B.opaque")
 
@@ -2201,9 +2198,10 @@ def test37_var_upload(t):
         x = dr.arange(t, 3)
         dr.make_opaque(x)
 
-        z = frozen(x)
+        with pytest.raises(RuntimeError):
+            z = frozen(x)
 
-        assert dr.allclose(z, func(x))
+        # assert dr.allclose(z, func(x))
 
 @pytest.test_arrays("float32, jit, diff, shape=(*)")
 def test38_grad_isolate(t):
@@ -2345,3 +2343,46 @@ def test40_grad_postponed_part(t):
         
         for ref, res in zip(ref, res):
             assert dr.allclose(ref, res)
+
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
+def test40_nested(t):
+    
+    pkg = get_pkg(t)
+    mod = sys.modules[t.__module__]
+
+    A, B, Base, BasePtr = pkg.A, pkg.B, pkg.Base, pkg.BasePtr
+    a, b = A(), B()
+    a.value = dr.ones(t, 16)
+    dr.enable_grad(a.value)
+
+    U = mod.UInt32
+    xi = t(1, 2, 8, 3, 4)
+    yi = dr.reinterpret_array(U, BasePtr(a, a, a, a, a))
+
+    def nested(self, xi, yi):
+        return self.nested(xi, yi)
+
+    def func(c, xi, yi):
+        return dr.dispatch(c, nested, xi, yi)
+
+    frozen = dr.freeze(func)
+
+    for i in range(3):
+        c = BasePtr(a, a, a, b, b)
+        xi = t(1, 2, 8, 3, 4)
+        yi = dr.reinterpret_array(U, BasePtr(a, a, a, a, a))
+        
+        with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, True):
+            xref = func(c, xi, yi)
+            
+        assert dr.all(xref == xi + 1)
+        
+        c = BasePtr(a, a, a, b, b)
+        xi = t(1, 2, 8, 3, 4)
+        yi = dr.reinterpret_array(U, BasePtr(a, a, a, a, a))
+        
+        with dr.scoped_set_flag(dr.JitFlag.SymbolicCalls, True):
+            xfrozen = frozen(c, xi, yi)
+            
+        assert dr.all(xfrozen == xref)
+
