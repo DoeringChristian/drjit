@@ -1064,7 +1064,7 @@ template <typename T, typename... Args> auto& bind_traverse(nanobind::class_<T, 
     return cls;
 }
 
-void traverse_py_cb_ro(const TraversableBase *base, void *payload,
+inline void traverse_py_cb_ro(const TraversableBase *base, void *payload,
                        void (*fn)(void *, uint64_t)) {
     namespace nb = nanobind;
     nb::handle self = base->self_py();
@@ -1079,7 +1079,7 @@ void traverse_py_cb_ro(const TraversableBase *base, void *payload,
         fn(payload, index);
     }));
 }
-void traverse_py_cb_rw(TraversableBase *base, void *payload,
+inline void traverse_py_cb_rw(TraversableBase *base, void *payload,
                        uint64_t (*fn)(void *, uint64_t)) {
     
     namespace nb = nanobind;
