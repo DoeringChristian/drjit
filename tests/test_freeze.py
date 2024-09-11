@@ -3,9 +3,9 @@ import pytest
 from dataclasses import dataclass
 import sys
 
-dr.set_log_level(dr.LogLevel.Trace)
-dr.set_flag(dr.JitFlag.KernelFreezing, True)
-dr.set_flag(dr.JitFlag.ReuseIndices, False)
+# dr.set_log_level(dr.LogLevel.Trace)
+# dr.set_flag(dr.JitFlag.KernelFreezing, True)
+# dr.set_flag(dr.JitFlag.ReuseIndices, False)
 
 
 def get_single_entry(x):
@@ -434,7 +434,7 @@ def test16_non_jit_types(t):
 
 @pytest.test_arrays("uint32, jit, cuda, -is_diff, shape=(*)")
 def test17_literal(t):
-    dr.set_log_level(dr.LogLevel.Trace)
+    # dr.set_log_level(dr.LogLevel.Trace)
     # dr.set_flag(dr.JitFlag.KernelHistory, True)
 
     @dr.freeze
@@ -1865,7 +1865,7 @@ def test39_suspend_resume(
 
         assert model.frozen_eval.n_recordings == 1
 
-    dr.set_log_level(log_level)
+    # dr.set_log_level(log_level)
 
 
 @pytest.test_arrays("float32, jit, is_diff, shape=(*)")
@@ -1939,7 +1939,7 @@ def test40_with_grad_scatter(t, freeze: bool, change_params_width):
         assert dr.allclose(grad_p, grad_p_expected)
         print(f"------------------------------")
 
-    dr.set_log_level(log_level)
+    # dr.set_log_level(log_level)
 
 
 @pytest.test_arrays("float32, jit, is_diff, shape=(*)")
