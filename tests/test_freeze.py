@@ -2198,10 +2198,10 @@ def test37_var_upload(t):
         x = dr.arange(t, 3)
         dr.make_opaque(x)
 
-        # with pytest.raises(RuntimeError):
-        z = frozen(x)
+        with pytest.raises(RuntimeError, match = "created while recording"):
+            z = frozen(x)
 
-        assert dr.allclose(z, func(x))
+        # assert dr.allclose(z, func(x))
 
 @pytest.test_arrays("float32, jit, diff, shape=(*)")
 def test38_grad_isolate(t):
