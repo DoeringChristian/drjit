@@ -2344,7 +2344,7 @@ def test40_grad_postponed_part(t):
         for ref, res in zip(ref, res):
             assert dr.allclose(ref, res)
 
-@pytest.test_arrays("float32, cuda, jit, diff, shape=(*)")
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
 def test40_nested(t):
     
     pkg = get_pkg(t)
@@ -2386,3 +2386,49 @@ def test40_nested(t):
             
         assert dr.all(xfrozen == xref)
 
+
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
+def test41_loop_diff(t):
+    
+    pkg = get_pkg(t)
+    mod = sys.modules[t.__module__]
+    
+
+    Float = mod.Float
+    UInt = mod.UInt
+    Bool = mod.Bool
+    A = pkg.A
+
+    
+    @dr.syntax(print_code=True)
+    def loop(tex: A, t) -> Float:
+        mod = sys.modules[t.__module__]
+        
+        Float = mod.Float
+        UInt = mod.UInt
+        Bool = mod.Bool
+        
+        res = Float(0)
+        i = dr.arange(UInt, 10)
+        dr.make_opaque(i)
+
+        while dr.hint(i < 10, max_iterations=-1):
+            res += tex.g(Float(0), Bool(True)) + Float(i)
+            i += 1
+
+        return res
+
+    a = A()
+    a.value = dr.opaque(Float, 1)
+    
+    dr.enable_grad(a.value)
+
+    def mse(y):
+        return dr.mean(dr.mean(dr.square(y)))
+
+    for it in range(50):
+        y = loop(a, t)
+
+        loss = mse(y)
+
+        dr.backward(loss)
