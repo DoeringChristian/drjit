@@ -545,6 +545,8 @@ bool VariableTracker::Impl::traverse(Context &ctx, nb::handle h) {
 }
 
 uint64_t VariableTracker::Context::_traverse_write(uint64_t idx) {
+    if(!idx)
+        return 0;
     if (index_offset >= indices.size())
         nb::raise("internal error after state variable '%s': ran "
                   "out of indices", label.c_str());
@@ -580,6 +582,8 @@ uint64_t VariableTracker::Context::_traverse_write(uint64_t idx) {
 }
 
 void VariableTracker::Context::_traverse_read(uint64_t index) {
+    if(!index)
+        return;
     ad_var_inc_ref(index);
     indices.push_back(index);
     index_offset++;
