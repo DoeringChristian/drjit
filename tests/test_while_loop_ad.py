@@ -2,6 +2,15 @@ import drjit as dr
 import pytest
 import sys
 
+def get_pkg(t):
+    with dr.detail.scoped_rtld_deepbind():
+        m = pytest.importorskip("call_ext")
+    backend = dr.backend_v(t)
+    if backend == dr.JitBackend.LLVM:
+        return m.llvm
+    elif backend == dr.JitBackend.CUDA:
+        return m.cuda
+
 @pytest.mark.parametrize('mode', ['evaluated', 'symbolic'])
 @pytest.mark.parametrize("optimize", [True, False])
 @pytest.test_arrays('float,is_diff,shape=(*)')
@@ -240,3 +249,30 @@ def test09_sum_loop_extra(t, mode):
 
         dr.backward(loss)
 
+@pytest.test_arrays('float32,diff,shape=(*)')
+@dr.syntax
+def test10_loop_suspended(t):
+    # Test that a loop does not fail in a suspended grad context
+    
+    dr.set_flag(dr.JitFlag.ReuseIndices, False)
+    dr.set_log_level(dr.LogLevel.Trace)
+    mod = sys.modules[t.__module__]
+    Float = mod.Float
+    UInt = mod.UInt
+    pkg = get_pkg(t)
+    A = pkg.A
+
+    a = A()
+    a.value = Float(1, 2)
+    
+    dr.enable_grad(a.value)
+    print(f"{dr.grad_enabled(a.value)=}")
+    print(f"a.value: a{a.value.index_ad} r{a.value.index}")
+
+    with dr.suspend_grad():
+        print(f"a.value: a{a.value.index_ad} r{a.value.index}")
+        i = UInt(0)
+
+        while dr.hint(i < 3, mode="symbolic"):
+            a.value += 1
+            i += 1
