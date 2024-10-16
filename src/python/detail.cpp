@@ -374,10 +374,7 @@ void export_detail(nb::module_ &) {
      .def("set_scope", &jit_set_scope, "backend"_a, "scope"_a, doc_detail_set_scope);
 
     d.def("traverse_py_cb_ro", &traverse_py_cb_ro_impl);
-    d.def("traverse_py_cb_rw", traverse_py_cb_rw_impl);
-
-    d.def("traverse_py_cb_ro", &traverse_py_cb_ro_impl);
-    d.def("traverse_py_cb_rw", traverse_py_cb_rw_impl);
+    d.def("traverse_py_cb_rw", &traverse_py_cb_rw_impl);
 
     trace_func_handle = d.attr("trace_func");
 }
