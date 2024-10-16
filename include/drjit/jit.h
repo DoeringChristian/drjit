@@ -652,6 +652,10 @@ struct DRJIT_TRIVIAL_ABI JitArray
         return uint32_array_t<JitArray>::steal(jit_var_counter(Backend, size));
     }
 
+    static auto kernel_width() {
+        return uint32_array_t<JitArray>::steal(jit_var_width(Backend));
+    }
+
     template <typename... Ts> void set_label_(const Ts*... args) {
         Index index = jit_var_set_label(m_index, sizeof...(Ts), args...);
         jit_var_dec_ref(m_index);

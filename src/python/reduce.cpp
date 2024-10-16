@@ -468,6 +468,8 @@ nb::object none(nb::handle h, nb::handle axis) {
 nb::object mean(nb::handle value, nb::handle axis, nb::handle mode) {
     nb::object out = sum(value, axis, mode);
     // mean = sum / (num_input/num_output)
+    const ArraySupplement &s = supp(value);
+    
     return (out * prod(shape(out), nb::none())) / prod(shape(value), nb::none()); 
 }
 
