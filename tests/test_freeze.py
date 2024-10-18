@@ -1618,6 +1618,31 @@ def test33_simple_reductions(t):
         check_expected(sum_not_returned_wide, np.sum(x_np).item() + x)
         check_expected(sum_not_returned_single, np.sum(x_np).item() + 4)
 
+@pytest.test_arrays("float32, jit, shape=(*)")
+def test34_prefix_reductions(t):
+    import numpy as np
+    
+    mod = sys.modules[t.__module__]
+    Float = mod.Float32
+    n = 37
+
+    @dr.freeze
+    def prefix_sum(x):
+        return dr.prefix_reduce(dr.ReduceOp.Add, x, exclusive = False)
+    
+    def check_expected(fn, expected):
+        result = fn(x)
+
+        assert dr.width(result) == dr.width(expected)
+        assert isinstance(result, Float)
+        assert dr.allclose(result, expected)
+
+    for i in range(3):
+        x = dr.linspace(Float, 0, 1, n) + dr.opaque(Float, i)
+
+        x_np = x.numpy()
+        check_expected(prefix_sum, Float(np.cumsum(x_np)))
+
 
 @pytest.test_arrays("float32, jit, is_diff, shape=(*)")
 def test34_reductions_with_ad(t):
