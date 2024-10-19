@@ -54,6 +54,7 @@ enum class LayoutFlag : uint32_t {
     Unaligned = (1 << 1),
     GradEnabled = (1 << 2),
     Postponed = (1 << 3),
+    Registry = (1 << 4),
 };
 
 /// Stores information about python objects, such as their type, their number of
@@ -324,11 +325,8 @@ struct FlatVariables {
                                              : 0);
 
         } else {
-
-            jit_log(LogLevel::Error,
-                    "collect(): found variable %u in unsupported state %u!",
-                    index, (uint32_t)vs);
-            nb::raise("");
+            jit_raise("collect(): found variable %u in unsupported state %u!",
+                      index, (uint32_t) vs);
         }
         this->layout.push_back(layout);
     }
@@ -614,6 +612,29 @@ struct FlatVariables {
 
                 uint32_t num_fields = 0;
 
+                // Traverse the registry
+                jit_log(LogLevel::Debug, "registry{");
+                uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
+                std::vector<void*> registry_pointers;
+                registry_pointers.resize(registry_bound);
+                jit_registry_fill_ptrs(registry_pointers.data());
+
+                jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
+                jit_log(LogLevel::Debug, "layout_index=%u", this->layout.size());
+                for (void *ptr : registry_pointers) {
+                    jit_log(LogLevel::Debug, "ptr=%p", ptr);
+                    if(!ptr)
+                        continue;
+                    
+                    const drjit::TraversableBase *traversable =
+                        (drjit::TraversableBase *) ptr;
+
+                    traverse_cb(traversable, ctx);
+                    num_fields++;
+                }
+                jit_log(LogLevel::Debug, "}");
+
+                // Traverse the opaque C++ object
                 cb(h, nb::cpp_function([&](uint64_t index) {
                        if (!index)
                            return;
@@ -885,7 +906,6 @@ struct FlatVariables {
             return index;
         Layout &layout = this->layout[layout_index++];
 
-
         uint64_t new_index = this->construct_ad_index(layout, 0, index);
 
         if (layout.vt != (VarType)jit_var_type(index))
@@ -904,16 +924,37 @@ struct FlatVariables {
      * This corresponds to `traverse_cb`.
      */
     void assign_cb(drjit::TraversableBase *traversable) {
+        Layout &layout = this->layout[layout_index++];
+        
         struct Payload {
             FlatVariables *flat_vars;
             std::vector<uint64_t> tmp;
+            uint32_t num_fields;
+            uint32_t field_counter;
         };
-        Payload payload{this, std::vector<uint64_t>()};
+        jit_log(LogLevel::Debug, "    layout.num=%u", layout.num);
+        Payload payload{ this, std::vector<uint64_t>(), (uint32_t) layout.num,
+                         0 };
         traversable->traverse_1_cb_rw((void *) &payload, [](void *p,
                                                             uint64_t index) {
+            if (!index)
+                return index;
             Payload *payload = (Payload *) p;
+            jit_log(LogLevel::Debug, "    field_counter=%u", payload->field_counter);
+            if (payload->field_counter >= payload->num_fields)
+                jit_raise("While traversing an object "
+                          "for assigning the inputs, the number of "
+                          "variables to assign did not match the "
+                          "number of variables traversed when recording!");
+            payload->field_counter++;
+
             return payload->flat_vars->assign_cb_internal(index, payload->tmp);
         });
+        if (payload.field_counter != layout.num)
+            jit_raise("While traversing and object "
+                      "for assigning the inputs, the number of "
+                      "variables to assign did not match the "
+                      "number of variables traversed when recording!");
         for (uint64_t index : payload.tmp)
             ad_var_dec_ref(index);
     }
@@ -1046,6 +1087,29 @@ struct FlatVariables {
             } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
                 std::vector<uint64_t> tmp;
                 uint32_t num_fields = 0;
+                
+                // Assign the registry
+                jit_log(LogLevel::Debug, "registry{");
+                uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
+                std::vector<void*> registry_pointers;
+                registry_pointers.resize(registry_bound);
+                jit_registry_fill_ptrs(registry_pointers.data());
+                
+                jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
+                jit_log(LogLevel::Debug, "layout_index=%u", this->layout_index);
+                for (void *ptr : registry_pointers) {
+                    jit_log(LogLevel::Debug, "ptr=%p", ptr);
+                    if(!ptr)
+                        continue;
+                    
+                    drjit::TraversableBase *traversable =
+                        (drjit::TraversableBase *) ptr;
+
+                    assign_cb(traversable);
+                    num_fields++;
+                }
+                jit_log(LogLevel::Debug, "}");
+                
                 cb(dst, nb::cpp_function([&](uint64_t index) {
                        if (!index)
                            return index;
@@ -1240,6 +1304,27 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
             // We want to transfer ownership, so we have to drop references
             // afterwards.
             // This is accomplished by storing them.
+            
+            // Scheduling the registry
+            {
+                uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
+                std::vector<void*> registry_pointers;
+                registry_pointers.resize(registry_bound);
+                jit_registry_fill_ptrs(registry_pointers.data());
+
+                for (void *ptr : registry_pointers) {
+                    if (!ptr)
+                        continue;
+                    
+                    drjit::TraversableBase *traversable =
+                        (drjit::TraversableBase *) ptr;
+
+                    transform_in_place_traversable(traversable, op);
+                }
+            }
+            
+            
+            
             std::vector<uint64_t> tmp;
             cb(h, nb::cpp_function([&](uint64_t index) {
                    if (!index)
