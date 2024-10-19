@@ -612,28 +612,6 @@ struct FlatVariables {
 
                 uint32_t num_fields = 0;
 
-                // Traverse the registry
-                jit_log(LogLevel::Debug, "registry{");
-                uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
-                std::vector<void*> registry_pointers;
-                registry_pointers.resize(registry_bound);
-                jit_registry_fill_ptrs(registry_pointers.data());
-
-                jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
-                jit_log(LogLevel::Debug, "layout_index=%u", this->layout.size());
-                for (void *ptr : registry_pointers) {
-                    jit_log(LogLevel::Debug, "ptr=%p", ptr);
-                    if(!ptr)
-                        continue;
-                    
-                    const drjit::TraversableBase *traversable =
-                        (drjit::TraversableBase *) ptr;
-
-                    traverse_cb(traversable, ctx);
-                    num_fields++;
-                }
-                jit_log(LogLevel::Debug, "}");
-
                 // Traverse the opaque C++ object
                 cb(h, nb::cpp_function([&](uint64_t index) {
                        if (!index)
@@ -681,6 +659,47 @@ struct FlatVariables {
         }
 
         nb::print("}");
+    }
+
+    /**
+     * First traverses the whole registry and then the handle provided.
+     */
+    void traverse_with_registry(nb::handle h, TraverseContext &ctx){
+        // Traverse the registry
+        {
+            Layout layout;
+            layout.type = nb::borrow<nb::type_object>(nb::none());
+            size_t layout_index = this->layout.size();
+            this->layout.push_back(layout);
+
+            uint32_t num_fields = 0;
+            
+            jit_log(LogLevel::Debug, "registry{");
+            uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
+            std::vector<void*> registry_pointers;
+            registry_pointers.resize(registry_bound);
+            jit_registry_fill_ptrs(registry_pointers.data());
+
+            jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
+            jit_log(LogLevel::Debug, "layout_index=%u", this->layout.size());
+            for (void *ptr : registry_pointers) {
+                jit_log(LogLevel::Debug, "ptr=%p", ptr);
+                if(!ptr)
+                    continue;
+
+                const drjit::TraversableBase *traversable =
+                    (drjit::TraversableBase *) ptr;
+
+                traverse_cb(traversable, ctx);
+                num_fields++;
+            }
+            jit_log(LogLevel::Debug, "}");
+            
+            this->layout[layout_index].num = num_fields;
+        }
+
+        // Traverse the rest
+        traverse(h, ctx);
     }
 
     /**
@@ -1013,7 +1032,7 @@ struct FlatVariables {
     }
 
     /**
-     * Assigns the flattened variables to a already existing PyTree.
+     * Assigns the flattened variables to an already existing PyTree.
      * This is used when input variables are changed.
      */
     void assign(nb::handle dst) {
@@ -1088,28 +1107,6 @@ struct FlatVariables {
                 std::vector<uint64_t> tmp;
                 uint32_t num_fields = 0;
                 
-                // Assign the registry
-                jit_log(LogLevel::Debug, "registry{");
-                uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
-                std::vector<void*> registry_pointers;
-                registry_pointers.resize(registry_bound);
-                jit_registry_fill_ptrs(registry_pointers.data());
-                
-                jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
-                jit_log(LogLevel::Debug, "layout_index=%u", this->layout_index);
-                for (void *ptr : registry_pointers) {
-                    jit_log(LogLevel::Debug, "ptr=%p", ptr);
-                    if(!ptr)
-                        continue;
-                    
-                    drjit::TraversableBase *traversable =
-                        (drjit::TraversableBase *) ptr;
-
-                    assign_cb(traversable);
-                    num_fields++;
-                }
-                jit_log(LogLevel::Debug, "}");
-                
                 cb(dst, nb::cpp_function([&](uint64_t index) {
                        if (!index)
                            return index;
@@ -1153,6 +1150,40 @@ struct FlatVariables {
         }
 
         nb::print("}");
+    }
+
+    /**
+     * First assigns the registry and then the PyTree.
+     * Corresponds to `traverse_with_registry`.
+     */
+    void assign_with_registry(nb::handle dst){
+
+        // Assign registry
+        Layout &layout = this->layout[layout_index++];
+        uint32_t num_fields = 0;
+        jit_log(LogLevel::Debug, "registry{");
+        uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
+        std::vector<void*> registry_pointers;
+        registry_pointers.resize(registry_bound);
+        jit_registry_fill_ptrs(registry_pointers.data());
+        
+        jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
+        jit_log(LogLevel::Debug, "layout_index=%u", this->layout_index);
+        for (void *ptr : registry_pointers) {
+            jit_log(LogLevel::Debug, "ptr=%p", ptr);
+            if(!ptr)
+                continue;
+            
+            drjit::TraversableBase *traversable =
+                (drjit::TraversableBase *) ptr;
+
+            assign_cb(traversable);
+            num_fields++;
+        }
+        jit_log(LogLevel::Debug, "}");
+
+        // Assign rest
+        assign(dst);
     }
 
     void log_layout() const {
@@ -1662,16 +1693,15 @@ struct FunctionRecording {
         // Record the function
         // bool tmp = jit_flag(JitFlag::KernelFreezing);
         jit_set_flag(JitFlag::KernelFreezing, false);
-        nb::object result;
+        nb::object output;
         {
             ProfilerPhase profiler("function");
-            result = func(*input[0], **input[1]);
+            output = func(*input[0], **input[1]);
         }
         jit_set_flag(JitFlag::KernelFreezing, true);
 
-        nb::list output;
-        output.append(result);
-        output.append(input);
+        // output.append(result);
+        // output.append(input);
 
         // Eval the input and output and it's gradients.
         jit_log(LogLevel::Debug, "Evaluating output:");
@@ -1686,7 +1716,7 @@ struct FunctionRecording {
             }
             {
                 ProfilerPhase profiler("schedule output");
-                deep_eval(result, false);
+                deep_eval(output, false);
                 // throw std::runtime_error("test");
             }
             {
@@ -1728,6 +1758,7 @@ struct FunctionRecording {
             TraverseContext ctx;
             ctx.postponed = &postponed;
             out_variables.traverse(output, ctx);
+            out_variables.traverse_with_registry(input, ctx);
         }
 
         if ((out_variables.variables.size() > 0 &&
@@ -1755,9 +1786,9 @@ struct FunctionRecording {
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
                                     false);
 
-            out_variables.layout_index = 1;
+            out_variables.layout_index = 0;
             jit_log(LogLevel::Debug, "Construct:");
-            output = nb::borrow<nb::list>(out_variables.construct());
+            output = nb::borrow<nb::object>(out_variables.construct());
             // NOTE: temporarily disable this to not enqueue twice
             // jit_log(LogLevel::Debug, "Assign:");
             // out_variables.assign(input);
@@ -1808,19 +1839,19 @@ struct FunctionRecording {
         jit_log(LogLevel::Info, "Replaying done:");
 
         // Construct Output variables
-        nb::list result;
+        nb::object output;
         {
             // Enter Resume scope, so we can track gradients
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
                                     false);
-            out_variables.layout_index = 1;
+            out_variables.layout_index = 0;
             {
                 ProfilerPhase profiler("construct output");
-                result = nb::borrow<nb::list>(out_variables.construct());
+                output = nb::borrow<nb::object>(out_variables.construct());
             }
             {
                 ProfilerPhase profiler("assign input");
-                out_variables.assign(input);
+                out_variables.assign_with_registry(input);
             }
         }
 
@@ -1829,7 +1860,7 @@ struct FunctionRecording {
         // afterwards.
         out_variables.release();
 
-        return result;
+        return output;
     }
 };
 
@@ -1866,7 +1897,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             ProfilerPhase profiler("traverse input");
             jit_log(LogLevel::Debug, "freeze(): Traversing input.");
             TraverseContext ctx;
-            in_variables.traverse(input, ctx);
+            in_variables.traverse_with_registry(input, ctx);
         }
 
         raise_if(in_variables.backend == JitBackend::None,
