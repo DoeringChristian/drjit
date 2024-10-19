@@ -424,72 +424,6 @@ struct FlatVariables {
     }
 
     /**
-     * Traverse a polymorphic variable, and it's subtypes.
-     */
-    void traverse_class_var(nb::handle h, TraverseContext &ctx) {
-        const ArraySupplement &s = supp(h.type());
-
-        jit_log(LogLevel::Debug,
-                "traverse(): Found class variable on backend %u", backend);
-
-        // Add the base type (hopefully)
-        size_t layout_index = this->layout.size();
-        traverse_ad_var(h, ctx);
-
-        JitBackend backend = (JitBackend)s.backend;
-        nb::str domain = nb::borrow<nb::str>(nb::getattr(h.type(), "Domain"));
-
-        uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
-
-        jit_log(LogLevel::Debug,
-                "traverse(): Traversing %u instances of domain \"%s\".",
-                id_bound, domain.c_str());
-
-        // We use types of the subtypes as fields.
-        std::vector<nb::object> fields;
-        for (uint32_t id = 0; id < id_bound; ++id) {
-            void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
-            if (!ptr)
-                continue;
-
-            // WARN: very unsafe cast!
-            nb::intrusive_base *base = (nb::intrusive_base *)ptr;
-            const drjit::TraversableBase *traversable =
-                (drjit::TraversableBase *)base;
-            nb::handle inst_obj = base->self_py();
-
-            if (inst_obj.ptr()) {
-                fields.push_back(nb::borrow(inst_obj.type()));
-                traverse(inst_obj, ctx);
-            } else if (traversable) {
-                traverse_cb(traversable, ctx);
-            } else {
-                nb::raise("Could not traverse non-python sub-type!");
-            }
-        }
-
-        this->layout[layout_index].num = id_bound;
-        this->layout[layout_index].fields = std::move(fields);
-    }
-
-    /**
-     * Traverse andy drjit variable.
-     * It can be polimorphic or an ad variable.
-     */
-    void traverse_dr_var(nb::handle h, TraverseContext &ctx) {
-        nb::handle tp = h.type();
-
-        auto s = supp(h.type());
-
-        // Handle class var
-        if (s.is_class) {
-            traverse_class_var(h, ctx);
-        } else {
-            traverse_ad_var(h, ctx);
-        }
-    }
-
-    /**
      * Traverses a PyTree in DFS order, and records it's layout in the
      * `layout` vector.
      *
@@ -534,7 +468,7 @@ struct FlatVariables {
                     for (Py_ssize_t i = 0; i < len; ++i)
                         traverse(nb::steal(s.item(h.ptr(), i)), ctx);
                 } else {
-                    traverse_dr_var(h, ctx);
+                    traverse_ad_var(h, ctx);
                 }
             } else if (tp.is(&PyTuple_Type)) {
                 nb::tuple tuple = nb::borrow<nb::tuple>(h);
@@ -665,6 +599,10 @@ struct FlatVariables {
      * First traverses the whole registry and then the handle provided.
      */
     void traverse_with_registry(nb::handle h, TraverseContext &ctx){
+
+        // Traverse the handle
+        traverse(h, ctx);
+        
         // Traverse the registry
         {
             Layout layout;
@@ -675,10 +613,10 @@ struct FlatVariables {
             uint32_t num_fields = 0;
             
             jit_log(LogLevel::Debug, "registry{");
-            uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
+            uint32_t registry_bound = jit_registry_id_bound(backend, nullptr);
             std::vector<void*> registry_pointers;
             registry_pointers.resize(registry_bound);
-            jit_registry_fill_ptrs(registry_pointers.data());
+            jit_registry_fill_ptrs(backend, registry_pointers.data());
 
             jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
             jit_log(LogLevel::Debug, "layout_index=%u", this->layout.size());
@@ -697,9 +635,6 @@ struct FlatVariables {
             
             this->layout[layout_index].num = num_fields;
         }
-
-        // Traverse the rest
-        traverse(h, ctx);
     }
 
     /**
@@ -804,20 +739,6 @@ struct FlatVariables {
     }
 
     /**
-     * Construct a drjit variable.
-     * Corresponds to `traverse_dr_var`.
-     */
-    nb::object construct_dr_var(const Layout &layout, uint32_t shrink = 0) {
-        const ArraySupplement &s = supp(layout.type);
-
-        if (s.is_class) {
-            nb::raise("Tried to construct a polymorphic drjit variable");
-        } else {
-            return construct_ad_var(layout, shrink);
-        }
-    }
-
-    /**
      * This is the counterpart to the traverse method.
      * Given a layout vector and flat_variables, it re-constructs the PyTree.
      */
@@ -836,7 +757,7 @@ struct FlatVariables {
             const ArraySupplement &s = supp(layout.type);
             if (s.is_tensor) {
                 const Layout &array_layout = this->layout[layout_index++];
-                nb::object array = construct_dr_var(array_layout, layout.num);
+                nb::object array = construct_ad_var(array_layout, layout.num);
 
                 return layout.type(array, layout.py_object);
             } else if (s.ndim != 1) {
@@ -852,7 +773,7 @@ struct FlatVariables {
                 }
                 return result;
             } else {
-                return construct_dr_var(layout);
+                return construct_ad_var(layout);
             }
         } else if (layout.type.is(&PyTuple_Type)) {
             nb::list list;
@@ -978,59 +899,6 @@ struct FlatVariables {
             ad_var_dec_ref(index);
     }
 
-    
-    /**
-     * Assign a polymorphic variable and it's subtypes.
-     * Corresponds to `traverse_class_var`
-     */
-    void assign_class_var(Layout &layout, nb::handle dst) {
-        const ArraySupplement &s = supp(layout.type);
-
-        JitBackend backend = (JitBackend)s.backend;
-        nb::str domain =
-            nb::borrow<nb::str>(nb::getattr(layout.type, "Domain"));
-
-        uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
-        if (id_bound != layout.num) {
-            jit_fail("Number of sub-types registered with backend changed "
-                     "during recording!");
-        }
-
-        assign_ad_var(layout, dst);
-
-        for (uint32_t id = 0; id < id_bound; ++id) {
-            void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
-            if (!ptr)
-                continue;
-
-            // WARN: very unsafe cast!
-            nb::intrusive_base *base = (nb::intrusive_base *)ptr;
-            drjit::TraversableBase *traversable =
-                dynamic_cast<drjit::TraversableBase *>(base);
-            nb::handle inst_obj = base->self_py();
-
-            if (inst_obj.ptr()) {
-                assign(inst_obj);
-            } else if (traversable) {
-                assign_cb(traversable);
-            } else {
-                nb::raise("Could not traverse non-python sub-type!");
-            }
-        }
-    }
-
-    /**
-     * Assign a drjit variable.
-     * Corresponds to `traverse_dr_var`.
-     */
-    void assign_dr_var(Layout &layout, nb::handle dst) {
-        const ArraySupplement &s = supp(layout.type);
-        if (s.is_class)
-            assign_class_var(layout, dst);
-        else
-            assign_ad_var(layout, dst);
-    }
-
     /**
      * Assigns the flattened variables to an already existing PyTree.
      * This is used when input variables are changed.
@@ -1057,7 +925,7 @@ struct FlatVariables {
 
                     Layout &array_layout = this->layout[layout_index++];
                     
-                    assign_dr_var(array_layout, array);
+                    assign_ad_var(array_layout, array);
                 } else if (s.ndim != 1) {
                     Py_ssize_t len = s.shape[0];
                     if (len == DRJIT_DYNAMIC)
@@ -1066,7 +934,7 @@ struct FlatVariables {
                     for (Py_ssize_t i = 0; i < len; ++i)
                         assign(dst[i]);
                 } else {
-                    assign_dr_var(layout, dst);
+                    assign_ad_var(layout, dst);
                 }
             } else if (tp.is(&PyTuple_Type)) {
                 nb::tuple tuple = nb::borrow<nb::tuple>(dst);
@@ -1158,14 +1026,17 @@ struct FlatVariables {
      */
     void assign_with_registry(nb::handle dst){
 
+        // Assign the handle
+        assign(dst);
+        
         // Assign registry
         Layout &layout = this->layout[layout_index++];
         uint32_t num_fields = 0;
         jit_log(LogLevel::Debug, "registry{");
-        uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
+        uint32_t registry_bound = jit_registry_id_bound(backend, nullptr);
         std::vector<void*> registry_pointers;
         registry_pointers.resize(registry_bound);
-        jit_registry_fill_ptrs(registry_pointers.data());
+        jit_registry_fill_ptrs(backend, registry_pointers.data());
         
         jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
         jit_log(LogLevel::Debug, "layout_index=%u", this->layout_index);
@@ -1181,9 +1052,6 @@ struct FlatVariables {
             num_fields++;
         }
         jit_log(LogLevel::Debug, "}");
-
-        // Assign rest
-        assign(dst);
     }
 
     void log_layout() const {
@@ -1205,7 +1073,7 @@ struct TransformInPlaceCallback {
 
 static void transform_in_place(nb::handle h, TransformInPlaceCallback &op);
 
-static void transform_in_place_dr_flat(nb::handle h,
+static void transform_in_place_ad_var(nb::handle h,
                                        TransformInPlaceCallback &op) {
     nb::handle tp = h.type();
     nb::print(tp);
@@ -1242,51 +1110,6 @@ void transform_in_place_traversable(drjit::TraversableBase *traversable,
     }
 }
 
-static void transform_in_place_dr_class(nb::handle h,
-                                        TransformInPlaceCallback &op) {
-    nb::handle tp = h.type();
-    const ArraySupplement &s = supp(tp);
-
-    transform_in_place_dr_flat(h, op);
-
-    JitBackend backend = (JitBackend)s.backend;
-    nb::str domain = nb::borrow<nb::str>(nb::getattr(tp, "Domain"));
-
-    uint32_t id_bound = jit_registry_id_bound(backend, domain.c_str());
-
-    jit_log(LogLevel::Debug, "transforming %u subtypes of domain %s", id_bound,
-            domain.c_str());
-    for (uint32_t id = 0; id < id_bound; ++id) {
-        void *ptr = jit_registry_ptr(backend, domain.c_str(), id + 1);
-        jit_log(LogLevel::Debug, "traversing subtype with instance at %p", ptr);
-        if (!ptr)
-            continue;
-
-        // WARN: very unsafe cast!
-        nb::intrusive_base *base = (nb::intrusive_base *)ptr;
-        drjit::TraversableBase *traversable = (drjit::TraversableBase *)base;
-        nb::handle inst_obj = base->self_py();
-
-        if (inst_obj.ptr()) {
-            transform_in_place(inst_obj, op);
-        } else if (traversable) {
-            transform_in_place_traversable(traversable, op);
-        } else {
-            nb::raise("Could not traverse non-python sub-type!");
-        }
-    }
-}
-static void transform_in_place_dr(nb::handle h, TransformInPlaceCallback &op) {
-    nb::handle tp = h.type();
-
-    const ArraySupplement &s = supp(tp);
-
-    if (s.is_class)
-        transform_in_place_dr_class(h, op);
-    else
-        transform_in_place_dr_flat(h, op);
-}
-
 static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
     nb::handle tp = h.type();
 
@@ -1304,7 +1127,7 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
                 transform_in_place(h[i], op);
             }
         } else {
-            transform_in_place_dr(h, op);
+            transform_in_place_ad_var(h, op);
         }
     } else if (tp.is(&PyTuple_Type)) {
         nb::tuple tuple = nb::borrow<nb::tuple>(h);
@@ -1336,23 +1159,6 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
             // afterwards.
             // This is accomplished by storing them.
             
-            // Scheduling the registry
-            {
-                uint32_t registry_bound = jit_registry_id_bound(JitBackend::None, nullptr);
-                std::vector<void*> registry_pointers;
-                registry_pointers.resize(registry_bound);
-                jit_registry_fill_ptrs(registry_pointers.data());
-
-                for (void *ptr : registry_pointers) {
-                    if (!ptr)
-                        continue;
-                    
-                    drjit::TraversableBase *traversable =
-                        (drjit::TraversableBase *) ptr;
-
-                    transform_in_place_traversable(traversable, op);
-                }
-            }
             
             
             
@@ -1372,7 +1178,53 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
     }
 }
 
-static void deep_make_opaque(nb::handle h, bool eval = true) {
+static void transform_in_place_with_registry(nb::handle h,
+                                             TransformInPlaceCallback &op) {
+
+    // Transforming the registry
+    std::vector<void *> registry_pointers;
+    {
+
+        uint32_t registry_bound =
+            jit_registry_id_bound(JitBackend::LLVM, nullptr);
+        registry_pointers.resize(registry_bound);
+        jit_registry_fill_ptrs(JitBackend::LLVM, registry_pointers.data());
+
+        for (void *ptr : registry_pointers) {
+            if (!ptr)
+                continue;
+
+            drjit::TraversableBase *traversable =
+                (drjit::TraversableBase *) ptr;
+
+            transform_in_place_traversable(traversable, op);
+        }
+        registry_pointers.clear();
+    }
+    {
+
+        uint32_t registry_bound =
+            jit_registry_id_bound(JitBackend::CUDA, nullptr);
+        registry_pointers.resize(registry_bound);
+        jit_registry_fill_ptrs(JitBackend::CUDA, registry_pointers.data());
+
+        for (void *ptr : registry_pointers) {
+            if (!ptr)
+                continue;
+
+            drjit::TraversableBase *traversable =
+                (drjit::TraversableBase *) ptr;
+
+            transform_in_place_traversable(traversable, op);
+        }
+        registry_pointers.clear();
+    }
+
+    // Transforming the rest
+    transform_in_place(h, op);
+}
+
+static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = false) {
     jit_log(LogLevel::Debug, "make_opaque");
 
     struct ScheduleForceCallback : TransformInPlaceCallback {
@@ -1427,7 +1279,10 @@ static void deep_make_opaque(nb::handle h, bool eval = true) {
     };
 
     ScheduleForceCallback op;
-    transform_in_place(h, op);
+    if(registry)
+        transform_in_place_with_registry(h, op);
+    else
+        transform_in_place(h, op);
 
     if (op.result && eval) {
         nb::gil_scoped_release guard;
@@ -1712,12 +1567,11 @@ struct FunctionRecording {
                                     false);
             {
                 ProfilerPhase profiler("schedule input");
-                deep_make_opaque(input, false);
+                deep_make_opaque(input, false, true);
             }
             {
                 ProfilerPhase profiler("schedule output");
                 deep_eval(output, false);
-                // throw std::runtime_error("test");
             }
             {
                 nb::gil_scoped_release guard;
@@ -1890,7 +1744,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             // variables
             {
                 ProfilerPhase profiler("evaluate input");
-                deep_make_opaque(input);
+                deep_make_opaque(input, true, true);
             }
 
             // Traverse input variables
