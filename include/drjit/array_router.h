@@ -524,7 +524,7 @@ DRJIT_ROUTE_BINARY_FALLBACK(dot, dot, (E) a1 * (E) a2)
 template <typename Array>
 DRJIT_INLINE auto mean(const Array &a) {
     if constexpr (is_array_v<Array>)
-        return sum(a * (1.f / Array::kernel_width()));
+        return sum(a * (1.f / a.symbolic_width()));
     else
         return a;
 }

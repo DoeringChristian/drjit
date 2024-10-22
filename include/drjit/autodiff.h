@@ -669,10 +669,6 @@ struct DRJIT_TRIVIAL_ABI DiffArray
         return steal(Detached::counter(size).release());
     }
 
-    static auto kernel_width(size_t size) {
-        return steal(Detached::kernel_width(size).release());
-    }
-
     void store_(void *ptr) const {
         Detached::borrow((uint32_t) m_index).store_(ptr);
     }
@@ -706,6 +702,11 @@ struct DRJIT_TRIVIAL_ABI DiffArray
     }
 
     size_t size() const { return jit_var_size((uint32_t) m_index); }
+    
+    auto symbolic_width() {
+        return steal(Detached::symbolic_width().release());
+    }
+
 
     bool grad_enabled_() const {
         if constexpr (IsFloat)

@@ -592,6 +592,11 @@ struct DRJIT_TRIVIAL_ABI JitArray
     uint32_t index() const { return m_index; }
     uint32_t index_ad() const { return 0; }
     uint64_t index_combined() const { return m_index; }
+    
+    auto symbolic_width() {
+        return uint32_array_t<JitArray>::steal(jit_var_symbolic_width(Backend, m_index));
+    }
+
 
     void swap(JitArray &a) {
         uint32_t index = m_index;
@@ -650,10 +655,6 @@ struct DRJIT_TRIVIAL_ABI JitArray
 
     static auto counter(size_t size) {
         return uint32_array_t<JitArray>::steal(jit_var_counter(Backend, size));
-    }
-
-    static auto kernel_width() {
-        return uint32_array_t<JitArray>::steal(jit_var_width(Backend));
     }
 
     template <typename... Ts> void set_label_(const Ts*... args) {
