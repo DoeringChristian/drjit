@@ -11,6 +11,7 @@
 #include "shape.h"
 #include "base.h"
 #include "apply.h"
+#include "drjit/python.h"
 
 Py_ssize_t sq_length(PyObject *o) noexcept {
     const ArraySupplement &s = supp(Py_TYPE(o));
@@ -168,6 +169,39 @@ size_t width(nb::handle h) {
         nb::raise("drjit.width(): the input is ragged (i.e., it does not have a consistent size).");
 
     return to.width;
+}
+
+nb::object symbolic_width(nb::handle h){
+    struct TraverseOp : TraverseCallback{
+        size_t width;
+        uint32_t symbolic_width = 0;
+        bool ragged = false;
+        
+        void operator()(nb::handle h) override {
+            auto index_fn = supp(h.type()).index;
+            if (index_fn)
+                operator()(index_fn(inst_ptr(h)));
+        }
+
+        void operator()(uint64_t index) override {
+            size_t value = jit_var_size(index);
+            if (value != width)
+                ragged = true;
+            width = value;
+            if(!symbolic_width)
+                symbolic_width = jit_var_symbolic_width(index);
+        }
+    };
+
+    TraverseOp to;
+    traverse("drjit.symbolic_width", to, h);
+
+    if (to.ragged)
+        nb::raise("drjit.symbolic_width(): the input is ragged (i.e., it does not have a consistent size).");
+
+    ArrayMeta m{};
+    
+    
 }
 
 
