@@ -339,7 +339,6 @@ struct FlatVariables {
      * The function takes an optional python-type if that is known.
      */
     void traverse_ad_index(uint64_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
-        ProfilerPhase profiler("traverse_ad_index");
         int grad_enabled = ad_grad_enabled(index);
         jit_log(LogLevel::Debug,
                 "traverse(): a%u, r%u",
@@ -439,8 +438,8 @@ struct FlatVariables {
         ProfilerPhase profiler("traverse");
         nb::handle tp = h.type();
 
-        nb::print(tp);
-        nb::print("{");
+        auto tp_name = nb::type_name(tp).c_str();
+        jit_log(LogLevel::Debug, "traverse(): %s {", tp_name);
 
         try {
             if (is_drjit_type(tp)) {
@@ -592,7 +591,7 @@ struct FlatVariables {
             nb::raise_python_error();
         }
 
-        nb::print("}");
+        jit_log(LogLevel::Debug, "}");
     }
 
     /**
@@ -907,8 +906,8 @@ struct FlatVariables {
         nb::handle tp = dst.type();
         Layout &layout = this->layout[layout_index++];
 
-        nb::print(tp);
-        nb::print("{");
+        auto tp_name = nb::type_name(tp).c_str();
+        jit_log(LogLevel::Debug, "assign(): %s {", tp_name);
 
         if (!layout.type.equal(tp))
             nb::raise("Type missmatch! Type of original object %s does not "
@@ -1017,7 +1016,7 @@ struct FlatVariables {
             nb::raise_python_error();
         }
 
-        nb::print("}");
+        jit_log(LogLevel::Debug, "}");
     }
 
     /**
@@ -1076,7 +1075,6 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op);
 static void transform_in_place_ad_var(nb::handle h,
                                        TransformInPlaceCallback &op) {
     nb::handle tp = h.type();
-    nb::print(tp);
 
     const ArraySupplement &s = supp(tp);
 
