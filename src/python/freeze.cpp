@@ -19,17 +19,31 @@
 #include <tsl/robin_map.h>
 #include <tsl/robin_set.h>
 #include <vector>
+#include <cxxabi.h>
 
 struct ProfilerPhase {
-    const char* message;
-    ProfilerPhase(const char *message): message(message) {
+    std::string m_message;
+    bool m_free_message = false;
+    ProfilerPhase(const char *message): m_message(message) {
         jit_log(LogLevel::Debug, "profiler start: %s", message);
         jit_profile_range_push(message);
     }
 
+    ProfilerPhase(const drjit::TraversableBase *traversable){
+        int status;
+        const char *name = abi::__cxa_demangle(typeid(*traversable).name(), nullptr, nullptr, &status);
+        char *message = (char *)std::malloc(1024);
+        snprintf(message, 1024, "traverse_cb %s", name);
+        
+        jit_log(LogLevel::Debug, "profiler start: %s", message);
+        jit_profile_range_push(message);
+        m_message = message;
+        m_free_message = true;
+    }
+
     ~ProfilerPhase() {
         jit_profile_range_pop();
-        jit_log(LogLevel::Debug, "profiler end: %s", message);
+        jit_log(LogLevel::Debug, "profiler end: %s", m_message.c_str());
     }
 };
 
@@ -165,13 +179,13 @@ struct FlatVariables {
     /// The flattened variable indices of the input/output to a frozen function
     std::vector<uint32_t> variables;
     /// Mapping from drjit variable index to index in flat variables
-    tsl::robin_map<uint32_t, uint32_t> index_to_slot;
+    tsl::robin_map<uint32_t, uint32_t, UInt32Hasher> index_to_slot;
 
     /// We have to track the condition, where two variables have the same size
     /// during recording but don't when replaying.
     /// Therefore we de-duplicate the size.
     std::vector<uint32_t> sizes;
-    tsl::robin_map<uint32_t, uint32_t> size_to_slot;
+    tsl::robin_map<uint32_t, uint32_t, UInt32Hasher> size_to_slot;
 
     /// This saves information about the type, size and fields of pytree
     /// objects. The information is stored in DFS order.
@@ -209,9 +223,6 @@ struct FlatVariables {
 
         if (it == this->index_to_slot.end()) {
             uint32_t slot = this->variables.size();
-            jit_log(LogLevel::Info, "    aliasing var r%u -> slot s%u",
-                    variable_index, slot);
-
             // NOTE: an alternative to borrowing here would be to make `refcount
             // > 1` part of the layout, which would allow us to selectively
             // enable COW if it is necessary.
@@ -223,9 +234,7 @@ struct FlatVariables {
             return slot;
         } else {
             uint32_t slot = it.value();
-            jit_log(LogLevel::Info,
-                    "collect(): Found aliasing condition var r%u -> slot s%u",
-                    variable_index, slot);
+            // Found aliasing condition 
             return slot;
         }
     }
@@ -246,18 +255,14 @@ struct FlatVariables {
 
         if (it == this->size_to_slot.end()) {
             uint32_t slot = this->sizes.size();
-            jit_log(LogLevel::Info, "    aliasing size %u -> slot %u", size,
-                    slot);
 
             this->sizes.push_back(size);
 
             this->size_to_slot.insert({size, slot});
             return slot;
         } else {
+            // Found aliasing condition for size
             uint32_t slot = it.value();
-            jit_log(LogLevel::Info,
-                    "collect(): Found aliasing condition size %u -> slot %u",
-                    size, slot);
             return slot;
         }
     }
@@ -278,10 +283,6 @@ struct FlatVariables {
                       (uint32_t)var_backend, (uint32_t)this->backend);
         }
 
-        jit_log(LogLevel::Info,
-                "collect(): collecting r%u, backend=%u, type=%u", index,
-                var_backend, jit_var_type(index));
-
         if (jit_var_type(index) == VarType::Pointer) {
             // In order to support pointer inputs,
             // we would have to get the source variable, handle the case when
@@ -299,12 +300,10 @@ struct FlatVariables {
         layout.size_index = this->add_size(jit_var_size(index));
 
         if (vs == VarState::Literal) {
-            jit_log(LogLevel::Debug, "    vs=Literal");
             jit_var_read(index, 0, &layout.literal);
             // Store size in index variable, as this is not used for literals
             layout.index = jit_var_size(index);
         } else if (vs == VarState::Evaluated) {
-            jit_log(LogLevel::Debug, "    handling evaluate case");
             
             void *data = nullptr;
             uint32_t tmp = jit_var_data(index, &data);
@@ -312,9 +311,7 @@ struct FlatVariables {
                 jit_fail("traverse(): An evaluated variable changed during evaluation!");
             jit_var_dec_ref(tmp);
             
-            jit_log(LogLevel::Debug, "    vs=%s, data=%p", jit_var_kind_name(index), data);
             layout.index = this->add_variable_index(index);
-            // bool singleton_array = jit_var_size(index) == 1;
             bool unaligned = jit_var_is_unaligned(index);
 
             layout.flags |=
@@ -340,13 +337,11 @@ struct FlatVariables {
      */
     void traverse_ad_index(uint64_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
         int grad_enabled = ad_grad_enabled(index);
-        jit_log(LogLevel::Debug,
-                "traverse(): a%u, r%u",
-                (uint32_t)(index >> 32), (uint32_t)index, grad_enabled);
+        jit_log(LogLevel::Debug, "traverse(): a%u, r%u",
+                (uint32_t) (index >> 32), (uint32_t) index, grad_enabled);
         if (grad_enabled) {
             uint32_t ad_index = (uint32_t)(index >> 32);
             
-            jit_log(LogLevel::Debug, " => collecting ad var");
             Layout layout;
             layout.type = nb::borrow<nb::type_object>(tp);
             layout.num = 2;
@@ -359,12 +354,7 @@ struct FlatVariables {
             // ad variable as such.
             if(ctx.postponed && ctx.postponed->contains(ad_index)){
                 layout.flags |= (uint32_t)LayoutFlag::Postponed;
-                jit_log(LogLevel::Debug, "traverse(): found postponed ad_variable a%u", ad_index);
-            }else
-                jit_log(LogLevel::Debug,
-                        "traverse(): found ad variable a%u that has not been "
-                        "postponed",
-                        ad_index);
+            }
             
             this->layout.push_back(layout);
 
@@ -373,7 +363,6 @@ struct FlatVariables {
             traverse_jit_index(grad, ctx, tp);
             jit_var_dec_ref(grad);
         } else {
-            jit_log(LogLevel::Debug, " => collecting jit var");
             traverse_jit_index(index, ctx, tp);
         }
     }
@@ -397,6 +386,8 @@ struct FlatVariables {
      */
     void traverse_cb(const drjit::TraversableBase *traversable, TraverseContext &ctx,
                      nb::object type = nb::none()) {
+        ProfilerPhase profiler(traversable);
+        
         Layout layout;
         layout.type = nb::borrow<nb::type_object>(type);
         size_t layout_index = this->layout.size();
@@ -604,6 +595,7 @@ struct FlatVariables {
         
         // Traverse the registry
         {
+            ProfilerPhase profiler("traverse_registry");
             Layout layout;
             layout.type = nb::borrow<nb::type_object>(nb::none());
             size_t layout_index = this->layout.size();
