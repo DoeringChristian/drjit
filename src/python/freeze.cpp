@@ -219,23 +219,18 @@ struct FlatVariables {
      * to the same flat variable index.
      */
     uint32_t add_variable_index(uint32_t variable_index) {
-        auto it = this->index_to_slot.find(variable_index);
-
-        if (it == this->index_to_slot.end()) {
-            uint32_t slot = this->variables.size();
-            // NOTE: an alternative to borrowing here would be to make `refcount
-            // > 1` part of the layout, which would allow us to selectively
-            // enable COW if it is necessary.
+        uint32_t next_slot = this->variables.size();
+        auto result = this->index_to_slot.try_emplace(variable_index, next_slot);
+        auto it = result.first;
+        bool inserted = result.second;
+        
+        if(inserted){
             if (borrow)
                 jit_var_inc_ref(variable_index);
             this->variables.push_back(variable_index);
-
-            this->index_to_slot.insert({variable_index, slot});
-            return slot;
-        } else {
-            uint32_t slot = it.value();
-            // Found aliasing condition 
-            return slot;
+            return next_slot;
+        }else{
+            return it.value();
         }
     }
 
@@ -251,19 +246,16 @@ struct FlatVariables {
      * now differently sized variables can not be evaluated by the same kernel.
      */
     uint32_t add_size(uint32_t size) {
-        auto it = this->size_to_slot.find(size);
+        uint32_t next_slot = this->sizes.size();
+        auto result = this->size_to_slot.try_emplace(size, next_slot);
+        auto it = result.first;
+        bool inserted = result.second;
 
-        if (it == this->size_to_slot.end()) {
-            uint32_t slot = this->sizes.size();
-
+        if(inserted){
             this->sizes.push_back(size);
-
-            this->size_to_slot.insert({size, slot});
-            return slot;
-        } else {
-            // Found aliasing condition for size
-            uint32_t slot = it.value();
-            return slot;
+            return next_slot;
+        }else{
+            return it.value();
         }
     }
 
@@ -272,6 +264,7 @@ struct FlatVariables {
      * An optional type python type can be supplied if it is known.
      */
     void traverse_jit_index(uint32_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
+        // ProfilerPhase profiler("traverse_jit_index");
         VarInfo info = jit_set_backend(index);
         JitBackend var_backend = info.backend;
 
@@ -292,17 +285,19 @@ struct FlatVariables {
             nb::raise("Pointer inputs not yet supported!");
         }
 
+        uint32_t var_size = jit_var_size(index);
+        
         Layout layout;
         VarState vs = jit_var_state(index);
         layout.type = nb::borrow<nb::type_object>(tp);
         layout.vs = vs;
         layout.vt = jit_var_type(index);
-        layout.size_index = this->add_size(jit_var_size(index));
+        layout.size_index = this->add_size(var_size);
 
         if (vs == VarState::Literal) {
             jit_var_read(index, 0, &layout.literal);
             // Store size in index variable, as this is not used for literals
-            layout.index = jit_var_size(index);
+            layout.index = var_size;
         } else if (vs == VarState::Evaluated) {
             
             void *data = nullptr;
@@ -315,7 +310,7 @@ struct FlatVariables {
             bool unaligned = jit_var_is_unaligned(index);
 
             layout.flags |=
-                (jit_var_size(index) == 1 ? (uint32_t)LayoutFlag::SingletonArray
+                (var_size == 1 ? (uint32_t)LayoutFlag::SingletonArray
                                           : 0);
             layout.flags |=
                 (jit_var_is_unaligned(index) ? (uint32_t)LayoutFlag::Unaligned
@@ -336,6 +331,7 @@ struct FlatVariables {
      * The function takes an optional python-type if that is known.
      */
     void traverse_ad_index(uint64_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
+        // ProfilerPhase profiler("traverse_ad_index");
         int grad_enabled = ad_grad_enabled(index);
         jit_log(LogLevel::Debug, "traverse(): a%u, r%u",
                 (uint32_t) (index >> 32), (uint32_t) index, grad_enabled);
@@ -616,6 +612,7 @@ struct FlatVariables {
                 if(!ptr)
                     continue;
 
+                // War: ver
                 const drjit::TraversableBase *traversable =
                     (drjit::TraversableBase *) ptr;
 
