@@ -603,7 +603,7 @@ struct FlatVariables {
             uint32_t registry_bound = jit_registry_id_bound(backend, nullptr);
             std::vector<void*> registry_pointers;
             registry_pointers.resize(registry_bound);
-            jit_registry_fill_ptrs(backend, registry_pointers.data());
+            jit_registry_get_pointers(backend, registry_pointers.data());
 
             jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
             jit_log(LogLevel::Debug, "layout_index=%u", this->layout.size());
@@ -1040,7 +1040,7 @@ struct FlatVariables {
         uint32_t registry_bound = jit_registry_id_bound(backend, nullptr);
         std::vector<void*> registry_pointers;
         registry_pointers.resize(registry_bound);
-        jit_registry_fill_ptrs(backend, registry_pointers.data());
+        jit_registry_get_pointers(backend, registry_pointers.data());
         
         jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
         jit_log(LogLevel::Debug, "layout_index=%u", this->layout_index);
@@ -1207,7 +1207,7 @@ static void transform_in_place_with_registry(nb::handle h,
         uint32_t registry_bound =
             jit_registry_id_bound(JitBackend::LLVM, nullptr);
         registry_pointers.resize(registry_bound);
-        jit_registry_fill_ptrs(JitBackend::LLVM, registry_pointers.data());
+        jit_registry_get_pointers(JitBackend::LLVM, registry_pointers.data());
 
         for (void *ptr : registry_pointers) {
             if (!ptr)
@@ -1241,7 +1241,7 @@ static void transform_in_place_with_registry(nb::handle h,
         uint32_t registry_bound =
             jit_registry_id_bound(JitBackend::CUDA, nullptr);
         registry_pointers.resize(registry_bound);
-        jit_registry_fill_ptrs(JitBackend::CUDA, registry_pointers.data());
+        jit_registry_get_pointers(JitBackend::CUDA, registry_pointers.data());
 
         for (void *ptr : registry_pointers) {
             if (!ptr)
