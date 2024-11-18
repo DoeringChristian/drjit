@@ -86,11 +86,11 @@ struct Layout {
     VarType vt = VarType::Void;
     /// Optional evaluation state of the variable
     VarState vs = VarState::Invalid;
-    /// Weather the variable is an array with a single entry.
+    /// Whether the variable is an array with a single entry.
     /// Such arrays are handled differently by the compiler.
     // bool singleton_array = false;
     // bool unaligned = false;
-    // /// Weather this variable represents a value and it's gradient
+    // /// Whether this variable represents a value and it's gradient
     // /// The actual value and gradient layout is handled by the children.
     // bool grad_enabled = false;
     uint32_t flags = 0;
@@ -1614,9 +1614,9 @@ struct FunctionRecording {
             }
         }
 
-        // Pause recording before traversal as to not accedentally record
+        // Pause recording before traversal as to not accidentally record
         // unwanted operations.
-        jit_freeze_pause(backend);
+        // jit_freeze_pause(backend);
 
         // TODO: validate, that gradients wheren't enabled for inputs inside the
         // frozen function.

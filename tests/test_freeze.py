@@ -1537,7 +1537,7 @@ def test32_allocated_scratch_buffer(t):
         if dr.flag(dr.JitFlag.KernelFreezing):
             with pytest.raises(
                 RuntimeError,
-                match="was created before recording was started, but it was not speciefied as an input variable",
+                match="was created before recording was started, but it was not specified as an input variable!",
             ):
                 result = model.fn1(x)
             break
