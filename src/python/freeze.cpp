@@ -1154,6 +1154,11 @@ void transform_in_place_traversable(drjit::TraversableBase *traversable,
                                   });
 }
 
+/**
+ * A re-implementation of the ``transform`` function in `apply.cpp`, which does
+ * not return a new object, but transforms the objects in place, modifying the
+ * inner values of the reference.
+ */
 static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
     nb::handle tp = h.type();
 
