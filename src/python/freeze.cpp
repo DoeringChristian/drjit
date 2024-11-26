@@ -1700,8 +1700,7 @@ struct FunctionRecording {
         {
             ProfilerPhase profiler("dry run");
             dryrun_success =
-                jit_freeze_dry_run(recording, in_variables.variables.data(),
-                                    out_variables.variables.data());
+                jit_freeze_dry_run(recording, in_variables.variables.data());
         }
         if(!dryrun_success){
             // Dry run has failed. Re-record the function.
