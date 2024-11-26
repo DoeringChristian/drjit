@@ -1141,21 +1141,17 @@ void transform_in_place_traversable(drjit::TraversableBase *traversable,
                                     TransformInPlaceCallback &cb) {
     struct Payload {
         TransformInPlaceCallback &cb;
-        std::vector<uint64_t> tmp;
+        index64_vector tmp;
     };
-    Payload payload{cb, std::vector<uint64_t>()};
-    traversable->traverse_1_cb_rw((void *)&payload,
+    Payload payload{ cb, index64_vector() };
+    traversable->traverse_1_cb_rw((void *) &payload,
                                   [](void *p, uint64_t index) {
-                                      Payload *payload = (Payload *)p;
+                                      Payload *payload = (Payload *) p;
 
                                       uint64_t new_index = payload->cb(index);
-                                      payload->tmp.push_back(new_index);
+                                      payload->tmp.push_back_steal(new_index);
                                       return new_index;
                                   });
-
-    for (uint64_t index : payload.tmp) {
-        ad_var_dec_ref(index);
-    }
 }
 
 static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
@@ -1210,17 +1206,14 @@ static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
             
             
             
-            std::vector<uint64_t> tmp;
+            index64_vector tmp;
             cb(h, nb::cpp_function([&](uint64_t index) {
                    if (!index)
                        return index;
                    uint64_t new_index = op(index);
-                   tmp.push_back(new_index);
+                   tmp.push_back_steal(new_index);
                    return new_index;
                }));
-            for (uint64_t index : tmp) {
-                ad_var_dec_ref(index);
-            }
         } else {
         }
     }
