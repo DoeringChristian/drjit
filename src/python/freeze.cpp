@@ -59,6 +59,8 @@ struct ADScopeContext{
     }
 };
 
+using index64_vector = drjit::detail::index64_vector;
+
 static const char *doc_freeze = R"(
     
 )";
@@ -72,7 +74,7 @@ enum class LayoutFlag : uint32_t {
 };
 
 /// Stores information about python objects, such as their type, their number of
-/// sub-elements or their field keys. This can be used to reconstruct a pytree
+/// sub-elements or their field keys. This can be used to reconstruct a PyTree
 /// from a flattened variable array.
 struct Layout {
     /// Nanobind type of the container/variable
@@ -163,7 +165,7 @@ struct Layout {
 
 // Additional context required when traversing the inputs
 struct TraverseContext{
-    /// set of postponed ad nodes, used to mark inputs to functions.
+    /// Set of postponed ad nodes, used to mark inputs to functions.
     const tsl::robin_set<uint32_t, UInt32Hasher> *postponed = nullptr;
 };
 
@@ -243,7 +245,7 @@ struct FlatVariables {
      * when freezing a function and two different sizes when replaying.
      * In that case one kernel would be recorded, that evaluates both variables.
      * However, when replaying two kernels would have to be launched since the
-     * now differently sized variables can not be evaluated by the same kernel.
+     * now differently sized variables cannot be evaluated by the same kernel.
      */
     uint32_t add_size(uint32_t size) {
         uint32_t next_slot = this->sizes.size();
@@ -260,29 +262,27 @@ struct FlatVariables {
     }
 
     /**
-     * Traverse the jit index and add it to the flat variables.
-     * An optional type python type can be supplied if it is known.
+     * Traverse the variable referenced by a jit index and add it to the flat
+     * variables. An optional type python type can be supplied if it is known.
      */
     void traverse_jit_index(uint32_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
         // ProfilerPhase profiler("traverse_jit_index");
         VarInfo info = jit_set_backend(index);
         JitBackend var_backend = info.backend;
 
-        if (this->backend == var_backend || this->backend == JitBackend::None) {
-            this->backend = var_backend;
+        if (backend == var_backend || this->backend == JitBackend::None) {
+            backend = var_backend;
         } else {
-            nb::raise("freeze(): backend missmatch error (backend of this "
-                      "variable %u does not match backend of others %u)!",
-                      (uint32_t)var_backend, (uint32_t)this->backend);
+            jit_raise("freeze(): backend missmatch error (backend of this "
+                      "variable %s does not match backend of others %s)!",
+                      var_backend == JitBackend::CUDA ? "CUDA" : "LLVM",
+                      backend == JitBackend::CUDA ? "CUDA" : "LLVM");
         }
 
         if (jit_var_type(index) == VarType::Pointer) {
-            // In order to support pointer inputs,
-            // we would have to get the source variable, handle the case when
-            // it's rc > 1 and potentially create a new pointer pointing to the
-            // new source variable. Then we could add the new variable to the
-            // flat variables.
-            nb::raise("Pointer inputs not yet supported!");
+            // We do not support pointers as inputs. It might be possible with
+            // some extra handling, but they are never used directly.
+            jit_raise("Pointer inputs not yet supported!");
         }
 
         uint32_t var_size = jit_var_size(index);
@@ -295,10 +295,14 @@ struct FlatVariables {
         layout.size_index = this->add_size(var_size);
 
         if (vs == VarState::Literal) {
+            // Special case, where the variable is a literal. This should not
+            // occur, as all literals are made opaque in beforehand, however it
+            // is nice to have a fallback.
             jit_var_read(index, 0, &layout.literal);
             // Store size in index variable, as this is not used for literals
             layout.index = var_size;
         } else if (vs == VarState::Evaluated) {
+            // Special case, handling evaluated/opaque variables.
             
             void *data = nullptr;
             uint32_t tmp = jit_var_data(index, &data);
@@ -323,17 +327,17 @@ struct FlatVariables {
         this->layout.push_back(layout);
     }
     /**
-     * Add an ad variable by it's index.
-     * Both the value and gradient is added to the flattened variables.
-     * If the ad index has been marked as postponed in the
-     * \TraverseContext.postponed field, we mark the resulting layout with that
-     * flag. 
-     * The function takes an optional python-type if that is known.
+     * Add an ad variable by it's index. Both the value and gradient are added
+     * to the flattened variables. If the ad index has been marked as postponed
+     * in the \c TraverseContext.postponed field, we mark the resulting layout
+     * with that flag. This will cause the gradient edges to be propagated when
+     * assigning to the input. The function takes an optional python-type if
+     * it is known.
      */
     void traverse_ad_index(uint64_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
         // ProfilerPhase profiler("traverse_ad_index");
         int grad_enabled = ad_grad_enabled(index);
-        jit_log(LogLevel::Debug, "traverse(): a%u, r%u",
+        jit_log(LogLevel::Debug, "traverse_ad_index(): a%u, r%u",
                 (uint32_t) (index >> 32), (uint32_t) index, grad_enabled);
         if (grad_enabled) {
             uint32_t ad_index = (uint32_t)(index >> 32);
@@ -354,7 +358,7 @@ struct FlatVariables {
             
             this->layout.push_back(layout);
 
-            traverse_jit_index(index, ctx, tp);
+            traverse_jit_index((uint32_t)index, ctx, tp);
             uint32_t grad = ad_grad(index);
             traverse_jit_index(grad, ctx, tp);
             jit_var_dec_ref(grad);
@@ -364,7 +368,7 @@ struct FlatVariables {
     }
 
     /**
-     * Wrapper arround traverse_ad_index for a python variable handle.
+     * Wrapper aground traverse_ad_index for a python handle.
      */
     void traverse_ad_var(nb::handle h, TraverseContext &ctx) {
         auto s = supp(h.type());
@@ -426,7 +430,7 @@ struct FlatVariables {
         nb::handle tp = h.type();
 
         auto tp_name = nb::type_name(tp).c_str();
-        jit_log(LogLevel::Debug, "traverse(): %s {", tp_name);
+        jit_log(LogLevel::Debug, "FlatVariables::traverse(): %s {", tp_name);
 
         try {
             if (is_drjit_type(tp)) {
@@ -566,14 +570,12 @@ struct FlatVariables {
         } catch (nb::python_error &e) {
             nb::raise_from(e, PyExc_RuntimeError,
                            "FlatVariables::traverse(): error encountered while "
-                           "processing an argument "
-                           "of type '%U' (see above).",
+                           "processing an argument of type '%U' (see above).",
                            nb::type_name(tp).ptr());
         } catch (const std::exception &e) {
             nb::chain_error(PyExc_RuntimeError,
                             "FlatVariables::traverse(): error encountered "
-                            "while processing an argument "
-                            "of type '%U': %s",
+                            "while processing an argument of type '%U': %s",
                             nb::type_name(tp).ptr(), e.what());
             nb::raise_python_error();
         }
@@ -582,7 +584,8 @@ struct FlatVariables {
     }
 
     /**
-     * First traverses the whole registry and then the handle provided.
+     * First traverses the PyTree, then the registry. This ensures that
+     * additional data to vcalls is tracked correctly.
      */
     void traverse_with_registry(nb::handle h, TraverseContext &ctx){
 
@@ -670,7 +673,7 @@ struct FlatVariables {
      * value of the flat variables will be applied to the ad variable,
      * preserving the ad_idnex.
      *
-     * It returns a owning reference.
+     * It returns an owning reference.
      */
     uint64_t construct_ad_index(const Layout &layout, uint32_t shrink = 0, uint64_t prev_index = 0) {
         uint64_t index;
@@ -735,16 +738,17 @@ struct FlatVariables {
         const ArraySupplement &s = supp(result.type());
         s.init_index(index, inst_ptr(result));
 
-        // Have to decrement reference, as it is not part of `variables` and
-        // will not be freed
+        // We have to release the reference, since assignment will borrow from
+        // it.
         ad_var_dec_ref(index);
 
         return result;
     }
 
     /**
-     * This is the counterpart to the traverse method.
-     * Given a layout vector and flat_variables, it re-constructs the PyTree.
+     * This is the counterpart to the traverse method, used to construct the
+     * output of a frozen function. Given a layout vector and flat_variables, it
+     * re-constructs the PyTree.
      */
     nb::object construct() {
         if (this->layout.size() == 0) {
@@ -752,70 +756,89 @@ struct FlatVariables {
         }
 
         const Layout &layout = this->layout[layout_index++];
-        jit_log(LogLevel::Debug, "construct(): type=%s",
-                nb::type_name(layout.type).c_str());
+
+        auto tp_name = nb::type_name(layout.type).c_str();
+        jit_log(LogLevel::Debug, "FlatVariables::construct(): %s {", tp_name);
+
         if (layout.type.is(nb::none().type())) {
             return nb::none();
         }
-        if (is_drjit_type(layout.type)) {
-            const ArraySupplement &s = supp(layout.type);
-            if (s.is_tensor) {
-                const Layout &array_layout = this->layout[layout_index++];
-                nb::object array = construct_ad_var(array_layout, layout.num);
+        try {
+            if (is_drjit_type(layout.type)) {
+                const ArraySupplement &s = supp(layout.type);
+                if (s.is_tensor) {
+                    const Layout &array_layout = this->layout[layout_index++];
+                    nb::object array =
+                        construct_ad_var(array_layout, layout.num);
 
-                return layout.type(array, layout.py_object);
-            } else if (s.ndim != 1) {
-                auto result = nb::inst_alloc_zero(layout.type);
-                dr::ArrayBase *p = inst_ptr(result);
-                size_t size = s.shape[0];
-                if (size == DRJIT_DYNAMIC) {
-                    size = s.len(p);
-                    s.init(size, p);
+                    return layout.type(array, layout.py_object);
+                } else if (s.ndim != 1) {
+                    auto result      = nb::inst_alloc_zero(layout.type);
+                    dr::ArrayBase *p = inst_ptr(result);
+                    size_t size      = s.shape[0];
+                    if (size == DRJIT_DYNAMIC) {
+                        size = s.len(p);
+                        s.init(size, p);
+                    }
+                    for (size_t i = 0; i < size; ++i) {
+                        result[i] = construct();
+                    }
+                    return result;
+                } else {
+                    return construct_ad_var(layout);
                 }
-                for (size_t i = 0; i < size; ++i) {
-                    result[i] = construct();
+            } else if (layout.type.is(&PyTuple_Type)) {
+                nb::list list;
+                for (uint32_t i = 0; i < layout.num; ++i) {
+                    list.append(construct());
                 }
-                return result;
+                return nb::tuple(list);
+            } else if (layout.type.is(&PyList_Type)) {
+                nb::list list;
+                for (uint32_t i = 0; i < layout.num; ++i) {
+                    list.append(construct());
+                }
+                return list;
+            } else if (layout.type.is(&PyDict_Type)) {
+                nb::dict dict;
+                for (auto k : layout.fields) {
+                    dict[k] = construct();
+                }
+                return dict;
+            } else if (nb::dict ds = get_drjit_struct(layout.type);
+                       ds.is_valid()) {
+                nb::object tmp = layout.type();
+                // TODO: validation against `ds`
+                for (auto k : layout.fields) {
+                    nb::setattr(tmp, k, construct());
+                }
+                return tmp;
+            } else if (nb::object df = get_dataclass_fields(layout.type);
+                       df.is_valid()) {
+                nb::dict dict;
+                for (auto k : layout.fields) {
+                    dict[k] = construct();
+                }
+                return layout.type(**dict);
             } else {
-                return construct_ad_var(layout);
+                if (layout.py_object.is_none()) {
+                    nb::raise("Tried to construct a variable that is not "
+                              "constructable!");
+                }
+                return layout.py_object;
             }
-        } else if (layout.type.is(&PyTuple_Type)) {
-            nb::list list;
-            for (uint32_t i = 0; i < layout.num; ++i) {
-                list.append(construct());
-            }
-            return nb::tuple(list);
-        } else if (layout.type.is(&PyList_Type)) {
-            nb::list list;
-            for (uint32_t i = 0; i < layout.num; ++i) {
-                list.append(construct());
-            }
-            return list;
-        } else if (layout.type.is(&PyDict_Type)) {
-            nb::dict dict;
-            for (auto k : layout.fields) {
-                dict[k] = construct();
-            }
-            return dict;
-        } else if (nb::dict ds = get_drjit_struct(layout.type); ds.is_valid()) {
-            nb::object tmp = layout.type();
-            // TODO: validation against `ds`
-            for (auto k : layout.fields) {
-                nb::setattr(tmp, k, construct());
-            }
-            return tmp;
-        } else if (nb::object df = get_dataclass_fields(layout.type);
-                   df.is_valid()) {
-            nb::dict dict;
-            for (auto k : layout.fields) {
-                dict[k] = construct();
-            }
-            return layout.type(**dict);
-        } else {
-            if(layout.py_object.is_none()){
-                nb::raise("Tried to construct a variable that is not constructable!");
-            }
-            return layout.py_object;
+        } catch (nb::python_error &e) {
+            nb::raise_from(
+                e, PyExc_RuntimeError,
+                "FlatVariables::construct(): error encountered while "
+                "processing an argument of type '%U' (see above).",
+                nb::type_name(layout.type).ptr());
+        } catch (const std::exception &e) {
+            nb::chain_error(PyExc_RuntimeError,
+                            "FlatVariables::construct(): error encountered "
+                            "while processing an argument of type '%U': %s",
+                            nb::type_name(layout.type).ptr(), e.what());
+            nb::raise_python_error();
         }
     }
 
@@ -830,6 +853,7 @@ struct FlatVariables {
 
         uint64_t index;
         if(s.index){
+            // ``construct_ad_index`` is used for assignment
             index = construct_ad_index(layout, 0, s.index(inst_ptr(dst)));
         } else
             index = construct_ad_index(layout);
@@ -839,13 +863,21 @@ struct FlatVariables {
                 "index=%zu, grad_enabled=%u, ad_grad_enabled=%u", index,
                 grad_enabled(dst), ad_grad_enabled(index));
 
+        // Release reference, since ``construct_ad_index`` returns owning
+        // reference and ``s.reset_index`` borrows from it.
         ad_var_dec_ref(index);
     }
 
     /**
      * Helper function, used to assign a callback variable.
+     *
+     * \param tmp
+     *     This vector is populated with the indices to variables that have been
+     *     constructed. It is required to release the references, since the
+     *     references created by `construct_ad_index` are owning and they are
+     *     borrowed after the callback returns.
      */
-    uint64_t assign_cb_internal(uint64_t index, std::vector<uint64_t> &tmp){
+    uint64_t assign_cb_internal(uint64_t index, index64_vector &tmp){
         if(!index)
             return index;
         Layout &layout = this->layout[layout_index++];
@@ -853,13 +885,13 @@ struct FlatVariables {
         uint64_t new_index = this->construct_ad_index(layout, 0, index);
 
         if (layout.vt != (VarType)jit_var_type(index))
-            jit_fail("VarType missmatch %u != %u while assigning (a%u, r%u) -> (a%u, r%u)!",
-                     (uint32_t)layout.vt,
-                     (uint32_t)jit_var_type(index),
-                     (uint32_t)(index >> 32), (uint32_t)index, (uint32_t)(new_index >> 32), (uint32_t)new_index
-                     );
-    
-        tmp.push_back(new_index);
+            jit_raise("VarType missmatch %u != %u while assigning (a%u, r%u) "
+                      "-> (a%u, r%u)!",
+                      (uint32_t) layout.vt, (uint32_t) jit_var_type(index),
+                      (uint32_t) (index >> 32), (uint32_t) index,
+                      (uint32_t) (new_index >> 32), (uint32_t) new_index);
+
+        tmp.push_back_steal(new_index);
         return new_index;
     }
 
@@ -872,13 +904,12 @@ struct FlatVariables {
         
         struct Payload {
             FlatVariables *flat_vars;
-            std::vector<uint64_t> tmp;
+            index64_vector tmp;
             uint32_t num_fields;
             uint32_t field_counter;
         };
         jit_log(LogLevel::Debug, "    layout.num=%u", layout.num);
-        Payload payload{ this, std::vector<uint64_t>(), (uint32_t) layout.num,
-                         0 };
+        Payload payload{ this, index64_vector(), (uint32_t) layout.num, 0 };
         traversable->traverse_1_cb_rw((void *) &payload, [](void *p,
                                                             uint64_t index) {
             if (!index)
@@ -887,38 +918,37 @@ struct FlatVariables {
             jit_log(LogLevel::Debug, "    field_counter=%u", payload->field_counter);
             if (payload->field_counter >= payload->num_fields)
                 jit_raise("While traversing an object "
-                          "for assigning the inputs, the number of "
-                          "variables to assign did not match the "
-                          "number of variables traversed when recording!");
+                          "for assigning inputs, the number of variables to "
+                          "assign did not match the number of variables "
+                          "traversed when recording!");
             payload->field_counter++;
 
             return payload->flat_vars->assign_cb_internal(index, payload->tmp);
         });
         if (payload.field_counter != layout.num)
-            jit_raise("While traversing and object "
-                      "for assigning the inputs, the number of "
-                      "variables to assign did not match the "
-                      "number of variables traversed when recording!");
-        for (uint64_t index : payload.tmp)
-            ad_var_dec_ref(index);
+            jit_raise("While traversing and object for assigning inputs, the "
+                      "number of variables to assign did not match the number "
+                      "of variables traversed when recording!");
     }
 
     /**
      * Assigns the flattened variables to an already existing PyTree.
-     * This is used when input variables are changed.
+     * This is used when input variables have changed.
      */
     void assign(nb::handle dst) {
         nb::handle tp = dst.type();
         Layout &layout = this->layout[layout_index++];
 
-        auto tp_name = nb::type_name(tp).c_str();
-        jit_log(LogLevel::Debug, "assign(): %s {", tp_name);
+        auto tp_name        = nb::type_name(tp).c_str();
+        auto layout_tp_name = nb::type_name(layout.type).c_str();
+        jit_log(LogLevel::Debug, "FlatVariables::assign(): %s with %s {",
+                tp_name, layout_tp_name);
 
         if (!layout.type.equal(tp))
-            nb::raise("Type missmatch! Type of original object %s does not "
-                      "match type of new object %s.",
-                      nb::type_name(tp).c_str(),
-                      nb::type_name(layout.type).c_str());
+            nb::raise(
+                "Type missmatch! Type of the object when recording %s does not "
+                "match type of object that is assigned %s.",
+                nb::type_name(tp).c_str(), nb::type_name(layout.type).c_str());
 
         try {
             if (is_drjit_type(tp)) {
@@ -976,7 +1006,7 @@ struct FlatVariables {
                         nb::setattr(dst, k, construct());
                 }
             } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
-                std::vector<uint64_t> tmp;
+                index64_vector tmp;
                 uint32_t num_fields = 0;
                 
                 cb(dst, nb::cpp_function([&](uint64_t index) {
@@ -990,20 +1020,18 @@ struct FlatVariables {
                        if (num_fields > layout.num)
                            jit_raise(
                                "While traversing the object of type %s "
-                               "for assigning the inputs, the number of "
-                               "variables to assign did not match the "
-                               "number of variables traversed when recording!",
+                               "for assigning inputs, the number of variables "
+                               "to assign did not match the number of "
+                               "variables traversed when recording!",
                                nb::str(tp).c_str());
                        return assign_cb_internal(index, tmp);
                    }));
                 if (num_fields != layout.num)
                     jit_raise("While traversing the object of type %s "
-                              "for assigning the inputs, the number of "
-                              "variables to assign did not match the "
-                              "number of variables traversed when recording!",
+                              "for assigning inputs, the number of variables "
+                              "to assign did not match the number of variables "
+                              "traversed when recording!",
                               nb::str(tp).c_str());
-                for (uint64_t index : tmp)
-                    ad_var_dec_ref(index);
             } else {
             }
         } catch (nb::python_error &e) {
@@ -1061,10 +1089,11 @@ struct FlatVariables {
 
             if (!traversable){
                 int status;
-                jit_fail("Could not cast intrusive_base to TraversableBase! "
-                         "The typename was: %s",
-                         abi::__cxa_demangle(typeid(*base).name(), nullptr,
-                                             nullptr, &status));
+                // TODO: should we put that behind the debug flag?
+                jit_raise("Could not cast intrusive_base to TraversableBase! "
+                          "The typename was: %s",
+                          abi::__cxa_demangle(typeid(*base).name(), nullptr,
+                                              nullptr, &status));
                 continue;
             }
 

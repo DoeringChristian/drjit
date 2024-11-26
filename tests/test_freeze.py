@@ -2457,6 +2457,23 @@ def test41_call_raise(t):
     with pytest.raises(RuntimeError):
         dr.dispatch(c, g, t(1, 1, 2, 2, 2))
 
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
+def test42_reduce_dot(t):
+    def func(x, y):
+        return dr.dot(x, y)
+
+    frozen = dr.freeze(func)
+
+    for i in range(3):
+        x = dr.arange(t, 10 + i)
+        y = dr.arange(t, 10 + i)
+
+        result = frozen(x, y)
+        reference = func(x, y)
+
+        assert dr.allclose(result, reference)
+
+    assert frozen.n_recordings == 1
         
 # @pytest.test_arrays("float32, jit, diff, shape=(*)")
 # def test42_raise(t):
