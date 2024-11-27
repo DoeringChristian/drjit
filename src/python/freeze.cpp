@@ -1,4 +1,5 @@
 #include "freeze.h"
+#include "apply.h"
 #include "autodiff.h"
 #include "base.h"
 #include "common.h"
@@ -295,6 +296,7 @@ struct FlatVariables {
         layout.size_index = this->add_size(var_size);
 
         if (vs == VarState::Literal) {
+            // jit_fail("test r%u", index);
             // Special case, where the variable is a literal. This should not
             // occur, as all literals are made opaque in beforehand, however it
             // is nice to have a fallback.
@@ -1154,80 +1156,34 @@ void transform_in_place_traversable(drjit::TraversableBase *traversable,
                                   });
 }
 
-/**
- * A re-implementation of the ``transform`` function in `apply.cpp`, which does
- * not return a new object, but transforms the objects in place, modifying the
- * inner values of the reference.
- */
-static void transform_in_place(nb::handle h, TransformInPlaceCallback &op) {
-    nb::handle tp = h.type();
+void traverse_traversable(drjit::TraversableBase *traversable,
+                           TraverseCallback &cb, bool traverse_rw) {
+    struct Payload {
+        TraverseCallback &cb;
+        index64_vector tmp;
+    };
+    Payload payload{cb, index64_vector()};
+    if (traverse_rw) {
+        traversable->traverse_1_cb_rw(
+            (void *) &payload, [](void *p, uint64_t index) {
+                Payload *payload = (Payload *) p;
 
-    if (is_drjit_type(tp)) {
-        const ArraySupplement &s = supp(tp);
-        if (s.is_tensor) {
-            nb::object array = nb::steal(s.tensor_array(h.ptr()));
-            transform_in_place(array, op);
-        } else if (s.ndim > 1) {
-            Py_ssize_t len = s.shape[0];
-            if (len == DRJIT_DYNAMIC)
-                len = s.len(inst_ptr(h));
-
-            for (Py_ssize_t i = 0; i < len; ++i) {
-                transform_in_place(h[i], op);
-            }
-        } else {
-            transform_in_place_ad_var(h, op);
-        }
-    } else if (tp.is(&PyTuple_Type)) {
-        nb::tuple tuple = nb::borrow<nb::tuple>(h);
-        for (uint32_t i = 0; i < tuple.size(); ++i) {
-            transform_in_place(tuple[i], op);
-        }
-    } else if (tp.is(&PyList_Type)) {
-        nb::list list = nb::borrow<nb::list>(h);
-        for (uint32_t i = 0; i < list.size(); ++i) {
-            transform_in_place(list[i], op);
-        }
-    } else if (tp.is(&PyDict_Type)) {
-        nb::dict dict = nb::borrow<nb::dict>(h);
-        for (auto v : dict.values()) {
-            transform_in_place(v, op);
-        }
+                uint64_t new_index = payload->cb.traverse_rw(index);
+                payload->tmp.push_back_steal(new_index);
+                return new_index;
+            });
     } else {
-        if (nb::dict ds = get_drjit_struct(tp); ds.is_valid()) {
-            for (auto k : ds.keys()) {
-                transform_in_place(nb::getattr(h, k), op);
-            }
-        } else if (nb::object df = get_dataclass_fields(tp)) {
-            for (nb::handle field : df) {
-                nb::object k = field.attr(DR_STR(name));
-                transform_in_place(nb::getattr(h, k), op);
-            }
-        } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
-            // We want to transfer ownership, so we have to drop references
-            // afterwards.
-            // This is accomplished by storing them.
-            
-            
-            
-            
-            index64_vector tmp;
-            cb(h, nb::cpp_function([&](uint64_t index) {
-                   if (!index)
-                       return index;
-                   uint64_t new_index = op(index);
-                   tmp.push_back_steal(new_index);
-                   return new_index;
-               }));
-        } else {
-        }
+        traversable->traverse_1_cb_ro(
+            (void *) &payload, [](void *p, uint64_t index) {
+                Payload *payload = (Payload *) p;
+                payload->cb(index);
+            });
     }
 }
 
-static void transform_in_place_with_registry(nb::handle h,
-                                             TransformInPlaceCallback &op) {
+static void traverse_with_registry(const char *op, TraverseCallback &tc,
+                                   nb::handle h, bool traverse_rw) {
 
-    // Transforming the registry
     std::vector<void *> registry_pointers;
     {
 
@@ -1245,7 +1201,7 @@ static void transform_in_place_with_registry(nb::handle h,
             auto self = base->self_py();
 
             if (self)
-                transform_in_place(self, op);
+                traverse(op, tc, self, traverse_rw);
 
             drjit::TraversableBase *traversable =
                 dynamic_cast<drjit::TraversableBase *>(base);
@@ -1259,7 +1215,7 @@ static void transform_in_place_with_registry(nb::handle h,
                 continue;
             }
 
-            transform_in_place_traversable(traversable, op);
+            traverse_traversable(traversable, tc, traverse_rw);
         }
         registry_pointers.clear();
     }
@@ -1277,23 +1233,32 @@ static void transform_in_place_with_registry(nb::handle h,
             drjit::TraversableBase *traversable =
                 (drjit::TraversableBase *) ptr;
 
-            transform_in_place_traversable(traversable, op);
+            traverse_traversable(traversable, tc, traverse_rw);
         }
         registry_pointers.clear();
     }
-
-    // Transforming the rest
-    transform_in_place(h, op);
+    
+    traverse(op, tc, h, traverse_rw);
 }
 
 static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = false) {
     jit_log(LogLevel::Debug, "make_opaque");
-
-    struct ScheduleForceCallback : TransformInPlaceCallback {
+    
+    struct ScheduleForceCallback: TraverseCallback {
         bool result = false;
+        
+        void operator()(nb::handle h) override {
+            const ArraySupplement &s = supp(h.type());
+            if (s.index)
+                s.reset_index(traverse_rw(s.index(inst_ptr(h))), inst_ptr(h));
+        }
 
-        uint64_t operator()(uint64_t index) override {
+        uint64_t traverse_rw(uint64_t index) override {
+            if (!index)
+                return index;
             uint64_t new_index;
+            jit_log(LogLevel::Debug, "    schedule a%u, r%u",
+                    (uint32_t) (index >> 32), (uint32_t) index);
             if (ad_grad_enabled(index)) {
 
                 uint32_t grad = ad_grad(index);
@@ -1335,16 +1300,21 @@ static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = fal
                 }
             }
 
+            jit_log(LogLevel::Debug, "    return a%u, r%u",
+                    (uint32_t) (new_index >> 32), (uint32_t) new_index);
 
             return new_index;
         }
+        
+        nb::callable m_callback;
     };
 
     ScheduleForceCallback op;
     if(registry)
-        transform_in_place_with_registry(h, op);
+        traverse_with_registry("schedule_force", op, h, true);
+        // transform_in_place_with_registry(h, op);
     else
-        transform_in_place(h, op);
+        traverse("schedule_force", op, h, true);
 
     if (op.result && eval) {
         nb::gil_scoped_release guard;
@@ -1355,10 +1325,16 @@ static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = fal
 static void deep_eval(nb::handle h, bool eval = true) {
     jit_log(LogLevel::Debug, "deep eval");
 
-    struct ScheduleCallback : TransformInPlaceCallback {
+    struct ScheduleCallback: TraverseCallback {
         bool result = false;
+        
+        void operator()(nb::handle h) override {
+            const ArraySupplement &s = supp(h.type());
+            if (s.index)
+                s.reset_index(traverse_rw(s.index(inst_ptr(h))), inst_ptr(h));
+        }
 
-        uint64_t operator()(uint64_t index) override {
+        uint64_t traverse_rw(uint64_t index) override {
             if (ad_grad_enabled(index)) {
                 int rv = 0;
 
@@ -1397,7 +1373,7 @@ static void deep_eval(nb::handle h, bool eval = true) {
     };
 
     ScheduleCallback op;
-    transform_in_place(h, op);
+    traverse("deep_eval", op, h, true);
 
     if (op.result && eval) {
         nb::gil_scoped_release guard;
@@ -1806,6 +1782,10 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             {
                 ProfilerPhase profiler("evaluate input");
                 deep_make_opaque(input, true, true);
+            }
+            {
+                nb::gil_scoped_release guard;
+                jit_eval();
             }
 
             // Traverse input variables
