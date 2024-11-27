@@ -304,13 +304,13 @@ void traverse_py_cb_ro_impl(nb::handle self, nb::callable c) {
 }
 
 void traverse_py_cb_rw_impl(nb::handle self, nb::callable c) {
-    struct PyTraverseCallback : TransformCallback {
-        void operator()(nb::handle h1, nb::handle h2) override {
-            const ArraySupplement &s = supp(h1.type());
+    struct PyTraverseCallback : TraverseCallback {
+        void operator()(nb::handle h) override {
+            const ArraySupplement &s = supp(h.type());
             if (s.index)
-                s.init_index(operator()(s.index(inst_ptr(h1))), inst_ptr(h2));
+                s.reset_index(traverse_rw(s.index(inst_ptr(h))), inst_ptr(h));
         }
-        uint64_t operator()(uint64_t index) override {
+        uint64_t traverse_rw(uint64_t index) override {
             return nb::cast<uint64_t>(m_callback(index));
         }
         nb::callable m_callback;
@@ -323,7 +323,7 @@ void traverse_py_cb_rw_impl(nb::handle self, nb::callable c) {
     auto dict = nb::borrow<nb::dict>(nb::getattr(self, "__dict__"));
 
     for (auto value : dict.values()) {
-        transform("traverse_py_cb_rw", traverse_cb, value);
+        traverse("traverse_py_cb_rw", traverse_cb, value, true);
     }
 }
 
