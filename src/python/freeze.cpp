@@ -1229,9 +1229,25 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
         for (void *ptr : registry_pointers) {
             if (!ptr)
                 continue;
+            
+            // WARN: very unsafe cast!
+            auto base = (nb::intrusive_base *)ptr;
+            auto self = base->self_py();
+
+            if (self)
+                traverse(op, tc, self, traverse_rw);
 
             drjit::TraversableBase *traversable =
-                (drjit::TraversableBase *) ptr;
+                dynamic_cast<drjit::TraversableBase *>(base);
+
+            if (!traversable) {
+                int status;
+                jit_fail("Could not cast intrusive_base to TraversableBase! "
+                         "The typename was: %s",
+                         abi::__cxa_demangle(typeid(*base).name(), nullptr,
+                                             nullptr, &status));
+                continue;
+            }
 
             traverse_traversable(traversable, tc, traverse_rw);
         }
