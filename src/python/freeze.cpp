@@ -17,28 +17,29 @@
 #include "pyerrors.h"
 #include "shape.h"
 #include "tupleobject.h"
+#include <cxxabi.h>
 #include <tsl/robin_map.h>
 #include <tsl/robin_set.h>
 #include <vector>
-#include <cxxabi.h>
 
 struct ProfilerPhase {
     std::string m_message;
     bool m_free_message = false;
-    ProfilerPhase(const char *message): m_message(message) {
+    ProfilerPhase(const char *message) : m_message(message) {
         jit_log(LogLevel::Debug, "profiler start: %s", message);
         jit_profile_range_push(message);
     }
 
-    ProfilerPhase(const drjit::TraversableBase *traversable){
+    ProfilerPhase(const drjit::TraversableBase *traversable) {
         int status;
-        const char *name = abi::__cxa_demangle(typeid(*traversable).name(), nullptr, nullptr, &status);
-        char *message = (char *)std::malloc(1024);
+        const char *name = abi::__cxa_demangle(typeid(*traversable).name(),
+                                               nullptr, nullptr, &status);
+        char *message    = (char *) std::malloc(1024);
         snprintf(message, 1024, "traverse_cb %s", name);
-        
+
         jit_log(LogLevel::Debug, "profiler start: %s", message);
         jit_profile_range_push(message);
-        m_message = message;
+        m_message      = message;
         m_free_message = true;
     }
 
@@ -48,16 +49,14 @@ struct ProfilerPhase {
     }
 };
 
-struct ADScopeContext{
+struct ADScopeContext {
     bool process_postponed;
     ADScopeContext(drjit::ADScope type, size_t size, const uint64_t *indices,
-            int symbolic, bool process_postponed)
+                   int symbolic, bool process_postponed)
         : process_postponed(process_postponed) {
         ad_scope_enter(type, size, indices, symbolic);
     }
-    ~ADScopeContext(){
-        ad_scope_leave(process_postponed);
-    }
+    ~ADScopeContext() { ad_scope_leave(process_postponed); }
 };
 
 using index64_vector = drjit::detail::index64_vector;
@@ -68,10 +67,10 @@ static const char *doc_freeze = R"(
 
 enum class LayoutFlag : uint32_t {
     SingletonArray = (1 << 0),
-    Unaligned = (1 << 1),
-    GradEnabled = (1 << 2),
-    Postponed = (1 << 3),
-    Registry = (1 << 4),
+    Unaligned      = (1 << 1),
+    GradEnabled    = (1 << 2),
+    Postponed      = (1 << 3),
+    Registry       = (1 << 4),
 };
 
 /// Stores information about python objects, such as their type, their number of
@@ -136,8 +135,8 @@ struct Layout {
             return false;
         }
         if (this->vs != rhs.vs) {
-            jit_log(LogLevel::Warn, "    vs: %u != %u", (uint32_t)this->vs,
-                    (uint32_t)rhs.vs);
+            jit_log(LogLevel::Warn, "    vs: %u != %u", (uint32_t) this->vs,
+                    (uint32_t) rhs.vs);
             return false;
         }
         if (this->flags != rhs.flags) {
@@ -165,7 +164,7 @@ struct Layout {
 };
 
 // Additional context required when traversing the inputs
-struct TraverseContext{
+struct TraverseContext {
     /// Set of postponed ad nodes, used to mark inputs to functions.
     const tsl::robin_set<uint32_t, UInt32Hasher> *postponed = nullptr;
 };
@@ -198,10 +197,8 @@ struct FlatVariables {
     // Wether variables should be borrowed, instead of stealing them
     bool borrow = true;
 
-    FlatVariables() {
-    }
-    FlatVariables(bool borrow) : borrow(borrow) {
-    }
+    FlatVariables() {}
+    FlatVariables(bool borrow) : borrow(borrow) {}
 
     void clear() {
         this->layout_index = 0;
@@ -223,16 +220,17 @@ struct FlatVariables {
      */
     uint32_t add_variable_index(uint32_t variable_index) {
         uint32_t next_slot = this->variables.size();
-        auto result = this->index_to_slot.try_emplace(variable_index, next_slot);
-        auto it = result.first;
+        auto result =
+            this->index_to_slot.try_emplace(variable_index, next_slot);
+        auto it       = result.first;
         bool inserted = result.second;
-        
-        if(inserted){
+
+        if (inserted) {
             if (borrow)
                 jit_var_inc_ref(variable_index);
             this->variables.push_back(variable_index);
             return next_slot;
-        }else{
+        } else {
             return it.value();
         }
     }
@@ -250,14 +248,14 @@ struct FlatVariables {
      */
     uint32_t add_size(uint32_t size) {
         uint32_t next_slot = this->sizes.size();
-        auto result = this->size_to_slot.try_emplace(size, next_slot);
-        auto it = result.first;
-        bool inserted = result.second;
+        auto result        = this->size_to_slot.try_emplace(size, next_slot);
+        auto it            = result.first;
+        bool inserted      = result.second;
 
-        if(inserted){
+        if (inserted) {
             this->sizes.push_back(size);
             return next_slot;
-        }else{
+        } else {
             return it.value();
         }
     }
@@ -266,9 +264,10 @@ struct FlatVariables {
      * Traverse the variable referenced by a jit index and add it to the flat
      * variables. An optional type python type can be supplied if it is known.
      */
-    void traverse_jit_index(uint32_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
+    void traverse_jit_index(uint32_t index, TraverseContext &ctx,
+                            nb::handle tp = nb::none()) {
         // ProfilerPhase profiler("traverse_jit_index");
-        VarInfo info = jit_set_backend(index);
+        VarInfo info           = jit_set_backend(index);
         JitBackend var_backend = info.backend;
 
         if (backend == var_backend || this->backend == JitBackend::None) {
@@ -287,12 +286,12 @@ struct FlatVariables {
         }
 
         uint32_t var_size = jit_var_size(index);
-        
+
         Layout layout;
-        VarState vs = jit_var_state(index);
-        layout.type = nb::borrow<nb::type_object>(tp);
-        layout.vs = vs;
-        layout.vt = jit_var_type(index);
+        VarState vs       = jit_var_state(index);
+        layout.type       = nb::borrow<nb::type_object>(tp);
+        layout.vs         = vs;
+        layout.vt         = jit_var_type(index);
         layout.size_index = this->add_size(var_size);
 
         if (vs == VarState::Literal) {
@@ -305,21 +304,21 @@ struct FlatVariables {
             layout.index = var_size;
         } else if (vs == VarState::Evaluated) {
             // Special case, handling evaluated/opaque variables.
-            
-            void *data = nullptr;
+
+            void *data   = nullptr;
             uint32_t tmp = jit_var_data(index, &data);
-            if(tmp != index)
-                jit_fail("traverse(): An evaluated variable changed during evaluation!");
+            if (tmp != index)
+                jit_fail("traverse(): An evaluated variable changed during "
+                         "evaluation!");
             jit_var_dec_ref(tmp);
-            
-            layout.index = this->add_variable_index(index);
+
+            layout.index   = this->add_variable_index(index);
             bool unaligned = jit_var_is_unaligned(index);
 
             layout.flags |=
-                (var_size == 1 ? (uint32_t)LayoutFlag::SingletonArray
-                                          : 0);
+                (var_size == 1 ? (uint32_t) LayoutFlag::SingletonArray : 0);
             layout.flags |=
-                (jit_var_is_unaligned(index) ? (uint32_t)LayoutFlag::Unaligned
+                (jit_var_is_unaligned(index) ? (uint32_t) LayoutFlag::Unaligned
                                              : 0);
 
         } else {
@@ -336,31 +335,32 @@ struct FlatVariables {
      * assigning to the input. The function takes an optional python-type if
      * it is known.
      */
-    void traverse_ad_index(uint64_t index, TraverseContext &ctx, nb::handle tp = nb::none()) {
+    void traverse_ad_index(uint64_t index, TraverseContext &ctx,
+                           nb::handle tp = nb::none()) {
         // ProfilerPhase profiler("traverse_ad_index");
         int grad_enabled = ad_grad_enabled(index);
         jit_log(LogLevel::Debug, "traverse_ad_index(): a%u, r%u",
                 (uint32_t) (index >> 32), (uint32_t) index, grad_enabled);
         if (grad_enabled) {
-            uint32_t ad_index = (uint32_t)(index >> 32);
-            
+            uint32_t ad_index = (uint32_t) (index >> 32);
+
             Layout layout;
             layout.type = nb::borrow<nb::type_object>(tp);
-            layout.num = 2;
-            layout.vt = jit_var_type(index);
-            
+            layout.num  = 2;
+            layout.vt   = jit_var_type(index);
+
             // Set flags
-            layout.flags |= (uint32_t)LayoutFlag::GradEnabled;
+            layout.flags |= (uint32_t) LayoutFlag::GradEnabled;
             // If the edge with this node as it's target has been postponed by
             // the isolate gradient scope, it has been enqueued and we mark the
             // ad variable as such.
-            if(ctx.postponed && ctx.postponed->contains(ad_index)){
-                layout.flags |= (uint32_t)LayoutFlag::Postponed;
+            if (ctx.postponed && ctx.postponed->contains(ad_index)) {
+                layout.flags |= (uint32_t) LayoutFlag::Postponed;
             }
-            
+
             this->layout.push_back(layout);
 
-            traverse_jit_index((uint32_t)index, ctx, tp);
+            traverse_jit_index((uint32_t) index, ctx, tp);
             uint32_t grad = ad_grad(index);
             traverse_jit_index(grad, ctx, tp);
             jit_var_dec_ref(grad);
@@ -386,12 +386,12 @@ struct FlatVariables {
     /**
      * Traverse a c++ tree using it's `traverse_1_cb_ro` callback.
      */
-    void traverse_cb(const drjit::TraversableBase *traversable, TraverseContext &ctx,
-                     nb::object type = nb::none()) {
+    void traverse_cb(const drjit::TraversableBase *traversable,
+                     TraverseContext &ctx, nb::object type = nb::none()) {
         ProfilerPhase profiler(traversable);
-        
+
         Layout layout;
-        layout.type = nb::borrow<nb::type_object>(type);
+        layout.type         = nb::borrow<nb::type_object>(type);
         size_t layout_index = this->layout.size();
         this->layout.push_back(layout);
 
@@ -402,12 +402,12 @@ struct FlatVariables {
             uint32_t num_fields;
             TraverseContext *ctx;
         };
-        Payload payload{this, 0, &ctx};
+        Payload payload{ this, 0, &ctx };
         traversable->traverse_1_cb_ro(
-            (void *)&payload, [](void *p, uint64_t index) {
-                if(!index)
+            (void *) &payload, [](void *p, uint64_t index) {
+                if (!index)
                     return;
-                Payload *payload = (Payload *)p;
+                Payload *payload = (Payload *) p;
                 payload->num_fields++;
                 payload->flat_vars->traverse_ad_index(index, *payload->ctx);
             });
@@ -420,12 +420,10 @@ struct FlatVariables {
      * `layout` vector.
      *
      * When hitting a drjit primitive type, it calls the
-     * `traverse_dr_var` method, which will add their indices to the `flat_variables`
-     * vector.
-     * The collect method will also record metadata about the drjit variable in
-     * the layout.
-     * Therefore, the layout can be used as an identifier to the recording of
-     * the frozen function.
+     * `traverse_dr_var` method, which will add their indices to the
+     * `flat_variables` vector. The collect method will also record metadata
+     * about the drjit variable in the layout. Therefore, the layout can be used
+     * as an identifier to the recording of the frozen function.
      */
     void traverse(nb::handle h, TraverseContext &ctx) {
         ProfilerPhase profiler("traverse");
@@ -441,9 +439,9 @@ struct FlatVariables {
                     nb::handle array = s.tensor_array(h.ptr());
 
                     Layout layout;
-                    layout.type = nb::borrow<nb::type_object>(tp);
+                    layout.type      = nb::borrow<nb::type_object>(tp);
                     layout.py_object = shape(h);
-                    layout.num = width(array);
+                    layout.num       = width(array);
                     this->layout.push_back(layout);
 
                     traverse(nb::steal(array), ctx);
@@ -454,7 +452,7 @@ struct FlatVariables {
 
                     Layout layout;
                     layout.type = nb::borrow<nb::type_object>(tp);
-                    layout.num = len;
+                    layout.num  = len;
                     this->layout.push_back(layout);
 
                     for (Py_ssize_t i = 0; i < len; ++i)
@@ -467,7 +465,7 @@ struct FlatVariables {
 
                 Layout layout;
                 layout.type = nb::borrow<nb::type_object>(tp);
-                layout.num = tuple.size();
+                layout.num  = tuple.size();
                 this->layout.push_back(layout);
 
                 for (nb::handle h2 : tuple) {
@@ -478,7 +476,7 @@ struct FlatVariables {
 
                 Layout layout;
                 layout.type = nb::borrow<nb::type_object>(tp);
-                layout.num = list.size();
+                layout.num  = list.size();
                 this->layout.push_back(layout);
 
                 for (nb::handle h2 : list) {
@@ -489,7 +487,7 @@ struct FlatVariables {
 
                 Layout layout;
                 layout.type = nb::borrow<nb::type_object>(tp);
-                layout.num = dict.size();
+                layout.num  = dict.size();
                 layout.fields.reserve(layout.num);
                 for (auto k : dict.keys()) {
                     layout.fields.push_back(nb::borrow(k));
@@ -503,7 +501,7 @@ struct FlatVariables {
 
                 Layout layout;
                 layout.type = nb::borrow<nb::type_object>(tp);
-                layout.num = ds.size();
+                layout.num  = ds.size();
                 layout.fields.reserve(layout.num);
                 for (auto k : ds.keys()) {
                     layout.fields.push_back(nb::borrow(k));
@@ -532,7 +530,7 @@ struct FlatVariables {
             } else if (nb::object cb = get_traverse_cb_ro(tp); cb.is_valid()) {
                 ProfilerPhase profiler("traverse cb");
                 Layout layout;
-                layout.type = nb::borrow<nb::type_object>(tp);
+                layout.type         = nb::borrow<nb::type_object>(tp);
                 size_t layout_index = this->layout.size();
                 this->layout.push_back(layout);
 
@@ -565,7 +563,7 @@ struct FlatVariables {
                         nb::type_name(tp).c_str());
 
                 Layout layout;
-                layout.type = nb::borrow<nb::type_object>(tp);
+                layout.type      = nb::borrow<nb::type_object>(tp);
                 layout.py_object = nb::borrow<nb::object>(h);
                 this->layout.push_back(layout);
             }
@@ -589,24 +587,24 @@ struct FlatVariables {
      * First traverses the PyTree, then the registry. This ensures that
      * additional data to vcalls is tracked correctly.
      */
-    void traverse_with_registry(nb::handle h, TraverseContext &ctx){
+    void traverse_with_registry(nb::handle h, TraverseContext &ctx) {
 
         // Traverse the handle
         traverse(h, ctx);
-        
+
         // Traverse the registry
         {
             ProfilerPhase profiler("traverse_registry");
             Layout layout;
-            layout.type = nb::borrow<nb::type_object>(nb::none());
+            layout.type         = nb::borrow<nb::type_object>(nb::none());
             size_t layout_index = this->layout.size();
             this->layout.push_back(layout);
 
             uint32_t num_fields = 0;
-            
+
             jit_log(LogLevel::Debug, "registry{");
             uint32_t registry_bound = jit_registry_id_bound(backend, nullptr);
-            std::vector<void*> registry_pointers;
+            std::vector<void *> registry_pointers;
             registry_pointers.resize(registry_bound);
             jit_registry_get_pointers(backend, registry_pointers.data());
 
@@ -614,11 +612,11 @@ struct FlatVariables {
             jit_log(LogLevel::Debug, "layout_index=%u", this->layout.size());
             for (void *ptr : registry_pointers) {
                 jit_log(LogLevel::Debug, "ptr=%p", ptr);
-                if(!ptr)
+                if (!ptr)
                     continue;
 
                 // WARN: very unsafe cast!
-                auto base = (nb::intrusive_base *)ptr;
+                auto base = (nb::intrusive_base *) ptr;
                 auto self = base->self_py();
 
                 if (self)
@@ -627,7 +625,7 @@ struct FlatVariables {
                 const drjit::TraversableBase *traversable =
                     dynamic_cast<const drjit::TraversableBase *>(base);
 
-                if(!traversable){
+                if (!traversable) {
                     int status;
                     jit_fail(
                         "Could not cast intrusive_base to TraversableBase! "
@@ -641,7 +639,7 @@ struct FlatVariables {
                 num_fields++;
             }
             jit_log(LogLevel::Debug, "}");
-            
+
             this->layout[layout_index].num = num_fields;
         }
     }
@@ -658,7 +656,8 @@ struct FlatVariables {
             return index;
         } else {
             uint32_t index = this->variables[layout.index];
-            jit_log(LogLevel::Debug, "    uses output[%u] = r%u", layout.index, index);
+            jit_log(LogLevel::Debug, "    uses output[%u] = r%u", layout.index,
+                    index);
 
             jit_var_inc_ref(index);
 
@@ -677,19 +676,20 @@ struct FlatVariables {
      *
      * It returns an owning reference.
      */
-    uint64_t construct_ad_index(const Layout &layout, uint32_t shrink = 0, uint64_t prev_index = 0) {
+    uint64_t construct_ad_index(const Layout &layout, uint32_t shrink = 0,
+                                uint64_t prev_index = 0) {
         uint64_t index;
-        if ((layout.flags & (uint32_t)LayoutFlag::GradEnabled) != 0) {
-            bool postponed = (layout.flags & (uint32_t)LayoutFlag::Postponed);
-                
+        if ((layout.flags & (uint32_t) LayoutFlag::GradEnabled) != 0) {
+            bool postponed = (layout.flags & (uint32_t) LayoutFlag::Postponed);
+
             Layout &val_layout = this->layout[layout_index++];
-            uint32_t val = construct_jit_index(val_layout);
+            uint32_t val       = construct_jit_index(val_layout);
 
             Layout &grad_layout = this->layout[layout_index++];
-            uint32_t grad = construct_jit_index(grad_layout);
+            uint32_t grad       = construct_jit_index(grad_layout);
 
             // Resize the gradient if it is a literal
-            if ((VarState)jit_var_state(grad) == VarState::Literal) {
+            if ((VarState) jit_var_state(grad) == VarState::Literal) {
                 uint32_t new_grad = jit_var_resize(grad, jit_var_size(val));
                 jit_var_dec_ref(grad);
                 grad = new_grad;
@@ -699,7 +699,7 @@ struct FlatVariables {
             // and gradient to the ad variable of that index instead of creating
             // a new one.
             uint32_t ad_index = (uint32_t) (prev_index >> 32);
-            if(ad_index){
+            if (ad_index) {
                 index = (((uint64_t) ad_index) << 32) | ((uint64_t) val);
                 ad_var_inc_ref(index);
             } else
@@ -732,11 +732,10 @@ struct FlatVariables {
      * Construct an ad variable given it's layout.
      * This corresponds to `traverse_ad_var`
      */
-    nb::object construct_ad_var(const Layout &layout,
-                                     uint32_t shrink = 0) {
+    nb::object construct_ad_var(const Layout &layout, uint32_t shrink = 0) {
         uint64_t index = construct_ad_index(layout, shrink);
 
-        auto result = nb::inst_alloc_zero(layout.type);
+        auto result              = nb::inst_alloc_zero(layout.type);
         const ArraySupplement &s = supp(result.type());
         s.init_index(index, inst_ptr(result));
 
@@ -854,7 +853,7 @@ struct FlatVariables {
         const ArraySupplement &s = supp(layout.type);
 
         uint64_t index;
-        if(s.index){
+        if (s.index) {
             // ``construct_ad_index`` is used for assignment
             index = construct_ad_index(layout, 0, s.index(inst_ptr(dst)));
         } else
@@ -879,14 +878,14 @@ struct FlatVariables {
      *     references created by `construct_ad_index` are owning and they are
      *     borrowed after the callback returns.
      */
-    uint64_t assign_cb_internal(uint64_t index, index64_vector &tmp){
-        if(!index)
+    uint64_t assign_cb_internal(uint64_t index, index64_vector &tmp) {
+        if (!index)
             return index;
         Layout &layout = this->layout[layout_index++];
 
         uint64_t new_index = this->construct_ad_index(layout, 0, index);
 
-        if (layout.vt != (VarType)jit_var_type(index))
+        if (layout.vt != (VarType) jit_var_type(index))
             jit_raise("VarType missmatch %u != %u while assigning (a%u, r%u) "
                       "-> (a%u, r%u)!",
                       (uint32_t) layout.vt, (uint32_t) jit_var_type(index),
@@ -903,7 +902,7 @@ struct FlatVariables {
      */
     void assign_cb(drjit::TraversableBase *traversable) {
         Layout &layout = this->layout[layout_index++];
-        
+
         struct Payload {
             FlatVariables *flat_vars;
             index64_vector tmp;
@@ -917,7 +916,8 @@ struct FlatVariables {
             if (!index)
                 return index;
             Payload *payload = (Payload *) p;
-            jit_log(LogLevel::Debug, "    field_counter=%u", payload->field_counter);
+            jit_log(LogLevel::Debug, "    field_counter=%u",
+                    payload->field_counter);
             if (payload->field_counter >= payload->num_fields)
                 jit_raise("While traversing an object "
                           "for assigning inputs, the number of variables to "
@@ -938,7 +938,7 @@ struct FlatVariables {
      * This is used when input variables have changed.
      */
     void assign(nb::handle dst) {
-        nb::handle tp = dst.type();
+        nb::handle tp  = dst.type();
         Layout &layout = this->layout[layout_index++];
 
         auto tp_name        = nb::type_name(tp).c_str();
@@ -960,7 +960,7 @@ struct FlatVariables {
                     nb::handle array = s.tensor_array(dst.ptr());
 
                     Layout &array_layout = this->layout[layout_index++];
-                    
+
                     assign_ad_var(array_layout, array);
                 } else if (s.ndim != 1) {
                     Py_ssize_t len = s.shape[0];
@@ -1010,7 +1010,7 @@ struct FlatVariables {
             } else if (nb::object cb = get_traverse_cb_rw(tp); cb.is_valid()) {
                 index64_vector tmp;
                 uint32_t num_fields = 0;
-                
+
                 cb(dst, nb::cpp_function([&](uint64_t index) {
                        if (!index)
                            return index;
@@ -1058,25 +1058,25 @@ struct FlatVariables {
      * First assigns the registry and then the PyTree.
      * Corresponds to `traverse_with_registry`.
      */
-    void assign_with_registry(nb::handle dst){
+    void assign_with_registry(nb::handle dst) {
 
         // Assign the handle
         assign(dst);
-        
+
         // Assign registry
-        Layout &layout = this->layout[layout_index++];
+        Layout &layout      = this->layout[layout_index++];
         uint32_t num_fields = 0;
         jit_log(LogLevel::Debug, "registry{");
         uint32_t registry_bound = jit_registry_id_bound(backend, nullptr);
-        std::vector<void*> registry_pointers;
+        std::vector<void *> registry_pointers;
         registry_pointers.resize(registry_bound);
         jit_registry_get_pointers(backend, registry_pointers.data());
-        
+
         jit_log(LogLevel::Debug, "registry_bound=%u", registry_bound);
         jit_log(LogLevel::Debug, "layout_index=%u", this->layout_index);
         for (void *ptr : registry_pointers) {
             jit_log(LogLevel::Debug, "ptr=%p", ptr);
-            if(!ptr)
+            if (!ptr)
                 continue;
 
             // WARN: very unsafe cast!
@@ -1089,7 +1089,7 @@ struct FlatVariables {
             drjit::TraversableBase *traversable =
                 dynamic_cast<drjit::TraversableBase *>(base);
 
-            if (!traversable){
+            if (!traversable) {
                 int status;
                 // TODO: should we put that behind the debug flag?
                 jit_raise("Could not cast intrusive_base to TraversableBase! "
@@ -1115,7 +1115,7 @@ struct FlatVariables {
 };
 
 void traverse_traversable(drjit::TraversableBase *traversable,
-                           TraverseCallback &cb, bool traverse_rw) {
+                          TraverseCallback &cb, bool traverse_rw) {
     struct Payload {
         TraverseCallback &cb;
     };
@@ -1129,11 +1129,11 @@ void traverse_traversable(drjit::TraversableBase *traversable,
                 return new_index;
             });
     } else {
-        traversable->traverse_1_cb_ro(
-            (void *) &payload, [](void *p, uint64_t index) {
-                Payload *payload = (Payload *) p;
-                payload->cb(index);
-            });
+        traversable->traverse_1_cb_ro((void *) &payload,
+                                      [](void *p, uint64_t index) {
+                                          Payload *payload = (Payload *) p;
+                                          payload->cb(index);
+                                      });
     }
 }
 
@@ -1151,9 +1151,9 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
         for (void *ptr : registry_pointers) {
             if (!ptr)
                 continue;
-            
+
             // WARN: very unsafe cast!
-            auto base = (nb::intrusive_base *)ptr;
+            auto base = (nb::intrusive_base *) ptr;
             auto self = base->self_py();
 
             if (self)
@@ -1185,9 +1185,9 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
         for (void *ptr : registry_pointers) {
             if (!ptr)
                 continue;
-            
+
             // WARN: very unsafe cast!
-            auto base = (nb::intrusive_base *)ptr;
+            auto base = (nb::intrusive_base *) ptr;
             auto self = base->self_py();
 
             if (self)
@@ -1209,20 +1209,21 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
         }
         registry_pointers.clear();
     }
-    
+
     traverse(op, tc, h, traverse_rw);
 }
 
-static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = false) {
+static void deep_make_opaque(nb::handle h, bool eval = true,
+                             bool registry = false) {
     jit_log(LogLevel::Debug, "make_opaque");
-    
-    struct ScheduleForceCallback: TraverseCallback {
+
+    struct ScheduleForceCallback : TraverseCallback {
         bool result = false;
         // NOTE: this is a really common pattern throughout my code, which could
         // be resolved by making the ``traverse_cb_rw`` steal the index and not
         // borrow it.
         index64_vector release_list;
-        
+
         void operator()(nb::handle h) override {
             const ArraySupplement &s = supp(h.type());
             if (s.index)
@@ -1239,25 +1240,27 @@ static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = fal
 
                 uint32_t grad = ad_grad(index);
 
-                int rv = 0;
+                int rv    = 0;
                 new_index = ad_var_schedule_force(index, &rv);
-                if (rv){
+                if (rv) {
                     jit_log(LogLevel::Debug,
                             "   scheduled ad-variable a%u, r%u -> a%u, r%u",
                             (uint32_t) (index >> 32), (uint32_t) index,
                             (uint32_t) (new_index >> 32), (uint32_t) new_index);
-                    jit_log(LogLevel::Debug, "    state=%u", jit_var_state(new_index));
+                    jit_log(LogLevel::Debug, "    state=%u",
+                            jit_var_state(new_index));
                     result = true;
                 }
 
-                rv = 0;
+                rv                = 0;
                 uint32_t new_grad = jit_var_schedule_force(grad, &rv);
                 jit_var_dec_ref(grad);
-                if (rv){
+                if (rv) {
                     jit_log(LogLevel::Debug,
                             "    scheduled gradient r%u -> r%u", grad,
                             new_grad);
-                    jit_log(LogLevel::Debug, "    state=%u", jit_var_state(new_grad));
+                    jit_log(LogLevel::Debug, "    state=%u",
+                            jit_var_state(new_grad));
                     result = true;
                 }
 
@@ -1265,9 +1268,9 @@ static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = fal
                 ad_accum_grad(new_index, new_grad);
                 jit_var_dec_ref(new_grad);
             } else {
-                int rv = 0;
+                int rv    = 0;
                 new_index = ad_var_schedule_force(index, &rv);
-                if (rv){
+                if (rv) {
                     jit_log(LogLevel::Debug,
                             "   scheduled variable r%u, label=%s -> r%u",
                             (uint32_t) index, jit_var_label(index),
@@ -1285,9 +1288,9 @@ static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = fal
     };
 
     ScheduleForceCallback op;
-    if(registry)
+    if (registry)
         traverse_with_registry("schedule_force", op, h, true);
-        // transform_in_place_with_registry(h, op);
+    // transform_in_place_with_registry(h, op);
     else
         traverse("schedule_force", op, h, true);
 
@@ -1300,7 +1303,7 @@ static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = fal
 static void deep_eval(nb::handle h, bool eval = true) {
     jit_log(LogLevel::Debug, "deep eval");
 
-    struct ScheduleCallback: TraverseCallback {
+    struct ScheduleCallback : TraverseCallback {
         bool result = false;
         // NOTE: this is a really common pattern throughout my code, which could
         // be resolved by making the ``traverse_cb_rw`` steal the index and not
@@ -1317,7 +1320,7 @@ static void deep_eval(nb::handle h, bool eval = true) {
             if (ad_grad_enabled(index)) {
                 int rv = 0;
 
-                if (jit_var_schedule(index)){
+                if (jit_var_schedule(index)) {
                     jit_log(LogLevel::Debug,
                             "   scheduled ad-variable a%u, r%u, label=%s",
                             (uint32_t) (index >> 32), (uint32_t) index,
@@ -1326,16 +1329,17 @@ static void deep_eval(nb::handle h, bool eval = true) {
                 }
 
                 uint32_t grad = ad_grad(index);
-                if (jit_var_schedule(grad)){
-                    jit_log(LogLevel::Debug, "    scheduled gradient r%u, label=%s",
-                            grad, jit_var_label(grad));
+                if (jit_var_schedule(grad)) {
+                    jit_log(LogLevel::Debug,
+                            "    scheduled gradient r%u, label=%s", grad,
+                            jit_var_label(grad));
                     result = true;
                 }
                 jit_var_dec_ref(grad);
 
             } else {
                 int rv = jit_var_schedule(index);
-                if (rv){
+                if (rv) {
                     jit_log(LogLevel::Debug,
                             "   scheduled variable r%u, label=%s",
                             (uint32_t) index, jit_var_label(index));
@@ -1365,13 +1369,13 @@ inline size_t py_object_hash(nb::handle h) {
     Py_hash_t hash = PyObject_Hash(h.ptr());
     if (hash == -1 && PyErr_Occurred())
         nb::raise_python_error();
-    return (ssize_t)hash;
+    return (ssize_t) hash;
 }
 
 inline void hash_combine(size_t &seed, size_t value) {
     /// From CityHash (https://github.com/google/cityhash)
     const size_t mult = 0x9ddfea08eb382d69ull;
-    size_t a = (value ^ seed) * mult;
+    size_t a          = (value ^ seed) * mult;
     a ^= (a >> 47);
     size_t b = (seed ^ a) * mult;
     b ^= (b >> 47);
@@ -1382,11 +1386,9 @@ struct RecordingKey {
     std::vector<Layout> layout;
     uint32_t flags;
 
-    RecordingKey() {
-    }
+    RecordingKey() {}
     RecordingKey(std::vector<Layout> layout, uint32_t flags)
-        : layout(std::move(layout)), flags(flags) {
-    }
+        : layout(std::move(layout)), flags(flags) {}
 
     bool operator==(const RecordingKey &rhs) const {
         return this->layout == rhs.layout && this->flags == rhs.flags;
@@ -1455,9 +1457,9 @@ struct RecordingKey {
                         nb::type_name(layout.type).c_str());
             jit_log(LogLevel::Debug, "            num = %u,", layout.num);
             jit_log(LogLevel::Debug, "            vt = %u,",
-                    (uint32_t)layout.vt);
+                    (uint32_t) layout.vt);
             jit_log(LogLevel::Debug, "            vs = %u,",
-                    (uint32_t)layout.vs);
+                    (uint32_t) layout.vs);
             jit_log(LogLevel::Debug, "            flags = %u,", layout.flags);
             jit_log(LogLevel::Debug, "        },");
         }
@@ -1478,16 +1480,16 @@ struct RecordingKeyHasher {
             for (auto &field : layout.fields) {
                 hash_combine(hash, py_object_hash(field));
             }
-            hash_combine(hash, (size_t)layout.vt);
-            hash_combine(hash, (size_t)layout.vs);
-            hash_combine(hash, (size_t)layout.flags);
-            hash_combine(hash, (size_t)layout.literal);
-            hash_combine(hash, (size_t)layout.index);
-            hash_combine(hash, (size_t)layout.size_index);
+            hash_combine(hash, (size_t) layout.vt);
+            hash_combine(hash, (size_t) layout.vs);
+            hash_combine(hash, (size_t) layout.flags);
+            hash_combine(hash, (size_t) layout.literal);
+            hash_combine(hash, (size_t) layout.index);
+            hash_combine(hash, (size_t) layout.size_index);
             hash_combine(hash, py_object_hash(layout.py_object));
         }
 
-        hash_combine(hash, (size_t)key.flags);
+        hash_combine(hash, (size_t) key.flags);
 
         return hash;
     }
@@ -1506,20 +1508,16 @@ struct FrozenFunction {
     RecordingKey prev_key;
     uint32_t recording_counter = 0;
 
-    FrozenFunction(nb::callable func) : func(func) {
-    }
-    ~FrozenFunction() {
-    }
+    FrozenFunction(nb::callable func) : func(func) {}
+    ~FrozenFunction() {}
 
-    FrozenFunction(const FrozenFunction &) = delete;
+    FrozenFunction(const FrozenFunction &)            = delete;
     FrozenFunction &operator=(const FrozenFunction &) = delete;
-    FrozenFunction(FrozenFunction &&) = default;
-    FrozenFunction &operator=(FrozenFunction &&) = default;
+    FrozenFunction(FrozenFunction &&)                 = default;
+    FrozenFunction &operator=(FrozenFunction &&)      = default;
 
-    uint32_t saved_recordings() {
-        return this->recordings.size();
-    }
-    
+    uint32_t saved_recordings() { return this->recordings.size(); }
+
     nb::object operator()(nb::args args, nb::kwargs kwargs);
 };
 
@@ -1527,12 +1525,11 @@ struct FunctionRecording {
     Recording *recording = nullptr;
     FlatVariables out_variables;
 
-    FunctionRecording() : out_variables(false) {
-    }
-    FunctionRecording(const FunctionRecording &) = delete;
+    FunctionRecording() : out_variables(false) {}
+    FunctionRecording(const FunctionRecording &)            = delete;
     FunctionRecording &operator=(const FunctionRecording &) = delete;
-    FunctionRecording(FunctionRecording &&) = default;
-    FunctionRecording &operator=(FunctionRecording &&) = default;
+    FunctionRecording(FunctionRecording &&)                 = default;
+    FunctionRecording &operator=(FunctionRecording &&)      = default;
 
     ~FunctionRecording() {
         if (this->recording) {
@@ -1545,7 +1542,7 @@ struct FunctionRecording {
         if (this->recording) {
             jit_freeze_destroy(this->recording);
         }
-        this->recording = nullptr;
+        this->recording     = nullptr;
         this->out_variables = FlatVariables(false);
     }
 
@@ -1614,11 +1611,9 @@ struct FunctionRecording {
         {
             drjit::vector<uint32_t> postponed_vec;
             ad_scope_postponed(postponed_vec);
-            for(uint32_t index : postponed_vec)
-            postponed.insert(index);
-
+            for (uint32_t index : postponed_vec)
+                postponed.insert(index);
         }
-            
 
         jit_log(LogLevel::Info, "Traversing output");
         {
@@ -1626,7 +1621,7 @@ struct FunctionRecording {
             // Enter Resume scope, so we can track gradients
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
                                     false);
-            
+
             TraverseContext ctx;
             ctx.postponed = &postponed;
             out_variables.traverse(output, ctx);
@@ -1643,7 +1638,7 @@ struct FunctionRecording {
                       "output "
                       "variables did not match backend %u of input "
                       "variables)",
-                      (uint32_t)out_variables.backend, (uint32_t)backend);
+                      (uint32_t) out_variables.backend, (uint32_t) backend);
         }
 
         recording = jit_freeze_stop(backend, out_variables.variables.data(),
@@ -1652,7 +1647,8 @@ struct FunctionRecording {
         jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
                 out_variables.variables.size());
 
-        // For catching input assignment missmatches, we asign the input and output
+        // For catching input assignment missmatches, we asign the input and
+        // output
         {
             // Enter Resume scope, so we can track gradients
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1,
@@ -1685,23 +1681,24 @@ struct FunctionRecording {
             dryrun_success =
                 jit_freeze_dry_run(recording, in_variables.variables.data());
         }
-        if(!dryrun_success){
+        if (!dryrun_success) {
             // Dry run has failed. Re-record the function.
             jit_log(LogLevel::Warn, "re-recording");
             this->clear();
             try {
                 return this->record(func, frozen_func, input, in_variables);
             } catch (nb::python_error &e) {
-                nb::raise_from(e, PyExc_RuntimeError,
-                               "replay(): error encountered while re-recording a "
-                               "function (see above).");
+                nb::raise_from(
+                    e, PyExc_RuntimeError,
+                    "replay(): error encountered while re-recording a "
+                    "function (see above).");
             } catch (const std::exception &e) {
                 jit_freeze_abort(in_variables.backend);
 
                 nb::chain_error(PyExc_RuntimeError, "record(): %s", e.what());
                 nb::raise_python_error();
             }
-        }else{
+        } else {
             ProfilerPhase profiler("jit replay");
             nb::gil_scoped_release guard;
             jit_freeze_replay(recording, in_variables.variables.data(),
@@ -1822,8 +1819,8 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
 
             FunctionRecording *recording = it.value().get();
 
-            { 
-                result = recording->replay(func, this, input, in_variables); 
+            {
+                result = recording->replay(func, this, input, in_variables);
             }
 
             in_variables.release();
@@ -1835,9 +1832,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
     return result;
 }
 
-FrozenFunction freeze(nb::callable func) {
-    return FrozenFunction(func);
-}
+FrozenFunction freeze(nb::callable func) { return FrozenFunction(func); }
 
 void export_freeze(nb::module_ &m) {
     m.def("freeze", &freeze, doc_freeze);
@@ -1854,8 +1849,9 @@ void export_freeze(nb::module_ &m) {
                          nb::rv_policy::move);
                  }
              })
-        .def_prop_ro("n_cached_recordings",
-                     [](FrozenFunction &self) { return self.saved_recordings(); })
+        .def_prop_ro(
+            "n_cached_recordings",
+            [](FrozenFunction &self) { return self.saved_recordings(); })
         .def_ro("n_recordings", &FrozenFunction::recording_counter)
         .def("__call__", &FrozenFunction::operator());
 }
