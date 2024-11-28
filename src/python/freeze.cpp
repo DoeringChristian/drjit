@@ -1114,62 +1114,18 @@ struct FlatVariables {
     }
 };
 
-struct TransformInPlaceCallback {
-    // The transform operation, applied to each index.
-    // Should return an owning reference.
-    virtual uint64_t operator()(uint64_t index) {
-        return index;
-    };
-};
-
-static void transform_in_place(nb::handle h, TransformInPlaceCallback &op);
-
-static void transform_in_place_ad_var(nb::handle h,
-                                       TransformInPlaceCallback &op) {
-    nb::handle tp = h.type();
-
-    const ArraySupplement &s = supp(tp);
-
-    auto index_fn = s.index;
-    if (!index_fn)
-        jit_fail("Index function not set!");
-    uint64_t index = index_fn(inst_ptr(h));
-    uint64_t new_index = op(index);
-    s.reset_index(new_index, inst_ptr(h));
-    ad_var_dec_ref(new_index);
-}
-
-void transform_in_place_traversable(drjit::TraversableBase *traversable,
-                                    TransformInPlaceCallback &cb) {
-    struct Payload {
-        TransformInPlaceCallback &cb;
-        index64_vector tmp;
-    };
-    Payload payload{ cb, index64_vector() };
-    traversable->traverse_1_cb_rw((void *) &payload,
-                                  [](void *p, uint64_t index) {
-                                      Payload *payload = (Payload *) p;
-
-                                      uint64_t new_index = payload->cb(index);
-                                      payload->tmp.push_back_steal(new_index);
-                                      return new_index;
-                                  });
-}
-
 void traverse_traversable(drjit::TraversableBase *traversable,
                            TraverseCallback &cb, bool traverse_rw) {
     struct Payload {
         TraverseCallback &cb;
-        index64_vector tmp;
     };
-    Payload payload{cb, index64_vector()};
+    Payload payload{ cb };
     if (traverse_rw) {
         traversable->traverse_1_cb_rw(
             (void *) &payload, [](void *p, uint64_t index) {
                 Payload *payload = (Payload *) p;
 
                 uint64_t new_index = payload->cb.traverse_rw(index);
-                payload->tmp.push_back_steal(new_index);
                 return new_index;
             });
     } else {
@@ -1262,6 +1218,10 @@ static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = fal
     
     struct ScheduleForceCallback: TraverseCallback {
         bool result = false;
+        // NOTE: this is a really common pattern throughout my code, which could
+        // be resolved by making the ``traverse_cb_rw`` steal the index and not
+        // borrow it.
+        index64_vector release_list;
         
         void operator()(nb::handle h) override {
             const ArraySupplement &s = supp(h.type());
@@ -1319,10 +1279,9 @@ static void deep_make_opaque(nb::handle h, bool eval = true, bool registry = fal
             jit_log(LogLevel::Debug, "    return a%u, r%u",
                     (uint32_t) (new_index >> 32), (uint32_t) new_index);
 
+            release_list.push_back_steal(new_index);
             return new_index;
         }
-        
-        nb::callable m_callback;
     };
 
     ScheduleForceCallback op;
@@ -1343,7 +1302,11 @@ static void deep_eval(nb::handle h, bool eval = true) {
 
     struct ScheduleCallback: TraverseCallback {
         bool result = false;
-        
+        // NOTE: this is a really common pattern throughout my code, which could
+        // be resolved by making the ``traverse_cb_rw`` steal the index and not
+        // borrow it.
+        index64_vector release_list;
+
         void operator()(nb::handle h) override {
             const ArraySupplement &s = supp(h.type());
             if (s.index)
@@ -1384,6 +1347,7 @@ static void deep_eval(nb::handle h, bool eval = true) {
             jit_log(LogLevel::Debug, "    scheduled a%u r%u",
                     (uint32_t) (index >> 32), (uint32_t) index);
 
+            release_list.push_back_steal(index);
             return index;
         }
     };
