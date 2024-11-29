@@ -1115,17 +1115,17 @@ struct FlatVariables {
 };
 
 void traverse_traversable(drjit::TraversableBase *traversable,
-                          TraverseCallback &cb, bool traverse_rw) {
+                          TraverseCallback &cb, bool rw = false) {
     struct Payload {
         TraverseCallback &cb;
     };
     Payload payload{ cb };
-    if (traverse_rw) {
+    if (rw) {
         traversable->traverse_1_cb_rw(
             (void *) &payload, [](void *p, uint64_t index) {
                 Payload *payload = (Payload *) p;
 
-                uint64_t new_index = payload->cb.traverse_rw(index);
+                uint64_t new_index = payload->cb(index);
                 return new_index;
             });
     } else {
@@ -1138,7 +1138,7 @@ void traverse_traversable(drjit::TraversableBase *traversable,
 }
 
 static void traverse_with_registry(const char *op, TraverseCallback &tc,
-                                   nb::handle h, bool traverse_rw) {
+                                   nb::handle h, bool rw = false) {
 
     std::vector<void *> registry_pointers;
     {
@@ -1157,7 +1157,7 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
             auto self = base->self_py();
 
             if (self)
-                traverse(op, tc, self, traverse_rw);
+                traverse(op, tc, self, rw);
 
             drjit::TraversableBase *traversable =
                 dynamic_cast<drjit::TraversableBase *>(base);
@@ -1171,7 +1171,7 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
                 continue;
             }
 
-            traverse_traversable(traversable, tc, traverse_rw);
+            traverse_traversable(traversable, tc, rw);
         }
         registry_pointers.clear();
     }
@@ -1191,7 +1191,7 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
             auto self = base->self_py();
 
             if (self)
-                traverse(op, tc, self, traverse_rw);
+                traverse(op, tc, self, rw);
 
             drjit::TraversableBase *traversable =
                 dynamic_cast<drjit::TraversableBase *>(base);
@@ -1205,12 +1205,12 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
                 continue;
             }
 
-            traverse_traversable(traversable, tc, traverse_rw);
+            traverse_traversable(traversable, tc, rw);
         }
         registry_pointers.clear();
     }
 
-    traverse(op, tc, h, traverse_rw);
+    traverse(op, tc, h);
 }
 
 static void deep_make_opaque(nb::handle h, bool eval = true,
@@ -1227,10 +1227,10 @@ static void deep_make_opaque(nb::handle h, bool eval = true,
         void operator()(nb::handle h) override {
             const ArraySupplement &s = supp(h.type());
             if (s.index)
-                s.reset_index(traverse_rw(s.index(inst_ptr(h))), inst_ptr(h));
+                s.reset_index(operator()(s.index(inst_ptr(h))), inst_ptr(h));
         }
 
-        uint64_t traverse_rw(uint64_t index) override {
+        uint64_t operator()(uint64_t index) override {
             if (!index)
                 return index;
             uint64_t new_index;
@@ -1313,10 +1313,10 @@ static void deep_eval(nb::handle h, bool eval = true) {
         void operator()(nb::handle h) override {
             const ArraySupplement &s = supp(h.type());
             if (s.index)
-                s.reset_index(traverse_rw(s.index(inst_ptr(h))), inst_ptr(h));
+                s.reset_index(operator()(s.index(inst_ptr(h))), inst_ptr(h));
         }
 
-        uint64_t traverse_rw(uint64_t index) override {
+        uint64_t operator()(uint64_t index) override {
             if (ad_grad_enabled(index)) {
                 int rv = 0;
 
@@ -1826,7 +1826,6 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             in_variables.release();
         }
     }
-    // WARN: should track which variables where enqueud
     ad_traverse(drjit::ADMode::Backward,
                 (uint32_t) drjit::ADFlag::ClearVertices);
     return result;
