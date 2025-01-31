@@ -1657,6 +1657,13 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             // In order to prevent issues with scattering, we borrow all input
             // variables, incrementing their refcount.
             in_variables.borrow();
+
+        }
+
+        {
+            ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, 0,
+                                    true);
+            in_variables.assign_with_registry(input);
         }
 
         in_heuristics = in_heuristics.max(in_variables.heuristic());
