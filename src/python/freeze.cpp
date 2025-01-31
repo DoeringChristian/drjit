@@ -188,11 +188,66 @@ uint32_t FlatVariables::add_variable_index(uint32_t variable_index) {
 
     if (inserted) {
         this->variables.push_back(variable_index);
+        jit_var_inc_ref(variable_index);
         auto &info = this->var_layout.emplace_back();
 
         return next_slot;
     } else {
         return it.value();
+    }
+}
+
+void FlatVariables::eval() {
+    nb::gil_scoped_release guard;
+    jit_eval();
+
+    assert(var_info.size() == variables.size());
+    for (uint32_t i = 0; i < var_layout.size(); i++) {
+        uint32_t index = variables[i];
+
+        auto &layout = var_layout[i];
+
+        auto info = jit_set_backend(index);
+
+        if (backend == info.backend || this->backend == JitBackend::None) {
+            backend = info.backend;
+        } else {
+            jit_raise("freeze(): backend missmatch error (backend of this "
+                      "variable %s does not match backend of others %s)!",
+                      info.backend == JitBackend::CUDA ? "CUDA" : "LLVM",
+                      backend == JitBackend::CUDA ? "CUDA" : "LLVM");
+        }
+
+        if (info.type == VarType::Pointer) {
+            // We do not support pointers as inputs. It might be possible
+            // with some extra handling, but they are never used directly.
+            jit_raise("Pointer inputs not supported!");
+        }
+
+        layout.vs         = info.state;
+        layout.vt         = info.type;
+        layout.size_index = this->add_size(info.size);
+
+        if (info.state == VarState::Literal) {
+            // Special case, where the variable is a literal. This should
+            // not occur, as all literals are made opaque in beforehand,
+            // however it is nice to have a fallback.
+            layout.literal = info.literal;
+            // Store size in index variable, as this is not used for
+            // literals
+            layout.literal_size = info.size;
+        } else if (info.state == VarState::Evaluated) {
+            // Special case, handling evaluated/opaque variables.
+
+            layout.flags |=
+                (info.size == 1 ? (uint32_t) JitLayoutFlag::SingletonArray : 0);
+            layout.flags |=
+                (info.unaligned ? (uint32_t) JitLayoutFlag::Unaligned : 0);
+
+        } else {
+            jit_raise("collect(): found variable %u in unsupported state %u!",
+                      index, (uint32_t) info.state);
+        }
     }
 }
 
@@ -232,15 +287,19 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
 
 
     int rv = 0;
-    if (ctx.schedule_force) {
-        index = jit_var_schedule_force(index, &rv);
-    } else{
-        rv = jit_var_schedule(index);
-        jit_var_inc_ref(index);
+    if (ctx.schedule) {
+        if (ctx.schedule_force) {
+            // Returns owning reference
+            index = jit_var_schedule_force(index, &rv);
+        } else {
+            rv = jit_var_schedule(index);
+            jit_var_inc_ref(index);
+        }
     }
 
-
     layout.index = add_variable_index(index);
+    // ``add_variable_index`` will borrow, so we have to release the reference
+    // jit_var_dec_ref(index);
 
     if (tp)
         layout.type = nb::borrow<nb::type_object>(tp);
@@ -362,7 +421,6 @@ void FlatVariables::traverse_ad_index(uint64_t index, TraverseContext &ctx,
 
         traverse_jit_index((uint32_t) index, ctx, tp);
         uint32_t grad = ad_grad(index);
-        jit_log(LogLevel::Warn, "traverse_ad_index(): val.size=%u, grad.size=%u", jit_var_size(index), jit_var_size(grad));
         traverse_jit_index(grad, ctx, tp);
         jit_var_dec_ref(grad);
     } else {
@@ -392,7 +450,7 @@ uint64_t FlatVariables::construct_ad_index(uint32_t shrink,
 
         uint32_t val = construct_jit_index(prev_index);
         uint32_t grad = construct_jit_index();
-        jit_log(LogLevel::Warn, "construct_ad_index(): val.size=%u, grad.size=%u", jit_var_size(val), jit_var_size(grad));
+        jit_log(LogLevel::Debug, "construct_ad_index(): val.size=%u, grad.size=%u", jit_var_size(val), jit_var_size(grad));
 
         // Resize the gradient if it is a literal
         if ((VarState) jit_var_state(grad) == VarState::Literal) {
@@ -605,7 +663,7 @@ void FlatVariables::traverse(nb::handle h, TraverseContext &ctx) {
     auto tp_name = nb::type_name(tp).c_str();
     jit_log(LogLevel::Debug, "FlatVariables::traverse(): %s {", tp_name);
 
-    jit_log(LogLevel::Warn, "traverse(): layout_index=%u", layout.size());
+    jit_log(LogLevel::Debug, "traverse(): layout_index=%u", layout.size());
 
     try {
         uint32_t layout_index = this->layout.size();
@@ -831,7 +889,7 @@ nb::object FlatVariables::construct() {
  */
 void FlatVariables::assign(nb::handle dst) {
     nb::handle tp  = dst.type();
-    jit_log(LogLevel::Warn, "assign(): layout_index=%u", layout_index);
+    jit_log(LogLevel::Debug, "assign(): layout_index=%u", layout_index);
     Layout &layout = this->layout[layout_index++];
 
     jit_log(LogLevel::Debug, "FlatVariables::assign(): %s with %s {",
@@ -1471,7 +1529,7 @@ nb::object FunctionRecording::record(nb::callable func,
     JitBackend backend = in_variables.backend;
     frozen_func->recording_counter++;
 
-    jit_log(LogLevel::Warn,
+    jit_log(LogLevel::Info,
             "Recording (n_inputs=%u):", in_variables.variables.size());
     jit_freeze_start(backend, in_variables.variables.data(),
                      in_variables.variables.size());
@@ -1487,25 +1545,24 @@ nb::object FunctionRecording::record(nb::callable func,
     // output.append(input);
 
     // Eval the input and output and it's gradients.
-    // jit_log(LogLevel::Debug, "Evaluating output:");
-    // {
-    //     ProfilerPhase profiler("evaluate input + output");
-    //     // Enter Resume scope, so we can track gradients
-    //     ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1, false);
-    //     {
-    //         ProfilerPhase profiler("schedule input");
-    //         deep_make_opaque(input, false, true);
-    //     }
-    //     {
-    //         ProfilerPhase profiler("schedule output");
-    //         deep_eval(output, false);
-    //     }
-    //     {
-    //         nb::gil_scoped_release guard;
-    //         jit_eval();
-    //     }
-    // }
-
+    jit_log(LogLevel::Debug, "Evaluating output:");
+    {
+        ProfilerPhase profiler("evaluate input + output");
+        // Enter Resume scope, so we can track gradients
+        ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1, false);
+        {
+            ProfilerPhase profiler("schedule input");
+            deep_make_opaque(input, false, true);
+        }
+        {
+            ProfilerPhase profiler("schedule output");
+            deep_eval(output, false);
+        }
+        {
+            nb::gil_scoped_release guard;
+            jit_eval();
+        }
+    }
 
     // Collect nodes, that have been postponed by the `Isolate` scope in a
     // hash set.
@@ -1529,11 +1586,14 @@ nb::object FunctionRecording::record(nb::callable func,
 
         TraverseContext ctx;
         ctx.postponed = &postponed;
-        ctx.schedule_force = true;
+        ctx.schedule_force = false;
+        ctx.schedule = false;
         out_variables.traverse(output, ctx);
+        // ctx.schedule_force = true;
         out_variables.traverse_with_registry(input, ctx);
         out_variables.eval();
     }
+
     jit_freeze_pause(backend);
 
     if ((out_variables.variables.size() > 0 &&
@@ -1561,11 +1621,10 @@ nb::object FunctionRecording::record(nb::callable func,
         ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1, false);
 
         out_variables.layout_index = 0;
-        jit_log(LogLevel::Warn, "record(): Assign");
+        jit_log(LogLevel::Debug, "record(): Assign");
         output = nb::borrow<nb::object>(out_variables.construct());
         // NOTE: temporarily disable this to not enqueue twice
-        out_variables.assign(input);
-        out_variables.layout_index = 0;
+        out_variables.assign_with_registry(input);
     }
 
     return output;
@@ -1622,7 +1681,7 @@ nb::object FunctionRecording::replay(nb::callable func,
             ProfilerPhase profiler("construct output");
             output = nb::borrow<nb::object>(out_variables.construct());
         }
-        jit_log(LogLevel::Warn, "replay(): Assign");
+        jit_log(LogLevel::Debug, "replay(): Assign");
         {
             ProfilerPhase profiler("assign input");
             out_variables.assign_with_registry(input);
@@ -1665,14 +1724,14 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
                                     true);
             // Evaluate input variables, forcing evaluation of undefined
             // variables
-            // {
-            //     ProfilerPhase profiler("evaluate input");
-            //     deep_make_opaque(input, true, true);
-            // }
-            // {
-            //     nb::gil_scoped_release guard;
-            //     jit_eval();
-            // }
+            {
+                ProfilerPhase profiler("evaluate input");
+                deep_make_opaque(input, true, true);
+            }
+            {
+                nb::gil_scoped_release guard;
+                jit_eval();
+            }
 
             // Traverse input variables
             ProfilerPhase profiler("traverse input");
@@ -1682,7 +1741,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             in_variables.traverse_with_registry(input, ctx);
             // In order to prevent issues with scattering, we borrow all input
             // variables, incrementing their refcount.
-            in_variables.borrow();
+            // in_variables.borrow();
         }
 
         in_heuristics = in_heuristics.max(in_variables.heuristic());
@@ -1699,6 +1758,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
 
         in_variables.eval();
         // TODO: somehow only do this in the record-path
+        in_variables.layout_index = 0;
         in_variables.assign_with_registry(input);
         in_variables.layout_index = 0;
 

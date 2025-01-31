@@ -106,6 +106,7 @@ struct TraverseContext {
     /// Set of postponed ad nodes, used to mark inputs to functions.
     const tsl::robin_set<uint32_t, UInt32Hasher> *postponed = nullptr;
     bool schedule_force                                     = false;
+    bool schedule                                           = true;
 };
 
 /**
@@ -191,61 +192,7 @@ struct FlatVariables {
         for (uint32_t &index : this->variables)
             jit_var_dec_ref(index);
     }
-    void eval() {
-        nb::gil_scoped_release guard;
-        jit_eval();
-
-        assert(var_info.size() ==  variables.size());
-        for (uint32_t i = 0; i < var_layout.size(); i++) {
-            uint32_t index = variables[i];
-
-            auto &layout = var_layout[i];
-
-            auto info = jit_set_backend(index);
-
-            if (backend == info.backend || this->backend == JitBackend::None) {
-                backend = info.backend;
-            } else {
-                jit_raise("freeze(): backend missmatch error (backend of this "
-                          "variable %s does not match backend of others %s)!",
-                          info.backend == JitBackend::CUDA ? "CUDA" : "LLVM",
-                          backend == JitBackend::CUDA ? "CUDA" : "LLVM");
-            }
-
-            if (info.type == VarType::Pointer) {
-                // We do not support pointers as inputs. It might be possible
-                // with some extra handling, but they are never used directly.
-                jit_raise("Pointer inputs not supported!");
-            }
-
-            layout.vs         = info.state;
-            layout.vt         = info.type;
-            layout.size_index = this->add_size(info.size);
-
-            if (info.state == VarState::Literal) {
-                // Special case, where the variable is a literal. This should
-                // not occur, as all literals are made opaque in beforehand,
-                // however it is nice to have a fallback.
-                layout.literal = info.literal;
-                // Store size in index variable, as this is not used for
-                // literals
-                layout.literal_size = info.size;
-            }
-            else if (info.state == VarState::Evaluated) {
-                // Special case, handling evaluated/opaque variables.
-
-                layout.flags |=
-                    (info.size == 1 ? (uint32_t) JitLayoutFlag::SingletonArray : 0);
-                layout.flags |=
-                    (info.unaligned ? (uint32_t) JitLayoutFlag::Unaligned : 0);
-
-            } else {
-                jit_raise(
-                    "collect(): found variable %u in unsupported state %u!",
-                    index, (uint32_t) info.state);
-            }
-        }
-    }
+    void eval();
 
     Heuristic heuristic() {
         return Heuristic{
@@ -412,7 +359,8 @@ struct RecordingKey {
     RecordingKey &operator=(RecordingKey &&) = default;
 
     bool operator==(const RecordingKey &rhs) const {
-        return this->layout == rhs.layout && this->flags == rhs.flags;
+        return this->layout == rhs.layout &&
+               this->var_layout == rhs.var_layout && this->flags == rhs.flags;
     }
 };
 
