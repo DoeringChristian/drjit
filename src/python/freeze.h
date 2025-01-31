@@ -24,16 +24,19 @@ namespace detail {
 
 using index64_vector = drjit::detail::index64_vector;
 
-enum class LayoutFlag : uint32_t {
-    /// Whether this variable has size 1
-    SingletonArray = (1 << 0),
-    /// Whether this variable is unaligned in memory
-    Unaligned = (1 << 1),
+enum class AdLayoutFlag : uint32_t {
     /// Whether this variable has gradients enabled
     GradEnabled = (1 << 2),
     /// Did this variable have gradient edges attached when recording, that
     /// where postponed by the ``isolate_grad`` function?
     Postponed = (1 << 3),
+};
+
+enum class JitLayoutFlag: uint32_t{
+    /// Whether this variable has size 1
+    SingletonArray = (1 << 0),
+    /// Whether this variable is unaligned in memory
+    Unaligned = (1 << 1),
 };
 
 /// Stores information about python objects, such as their type, their number of
@@ -46,20 +49,11 @@ struct Layout {
     /// Optional field identifiers of the container
     /// for example: keys in dictionary
     std::vector<nb::object> fields;
-    /// Optional drjit type of the variable
-    VarType vt = VarType::Void;
-    /// Optional evaluation state of the variable
-    VarState vs = VarState::Invalid;
-    uint32_t flags = 0;
-    /// The literal data
-    uint64_t literal = 0;
     /// The index in the flat_variables array of this variable.
     /// This can be used to determine aliasing.
     uint32_t index = 0;
-    /// We have to track the condition, where two variables have the same size
-    /// during recording but don't when replaying.
-    /// Therefore we de-duplicate the size.
-    uint32_t size_index = 0;
+
+    uint32_t flags = 0;
 
     /// If a non drjit type is passed as function arguments or result, we simply
     /// cache it here.
@@ -80,11 +74,38 @@ struct Layout {
     Layout &operator=(Layout &&) = default;
 };
 
+struct VarLayout{
+    /// We have to track the condition, where two variables have the same size
+    /// during recording but don't when replaying.
+    /// Therefore we de-duplicate the size.
+    uint32_t size_index = 0;
+    /// Optional drjit type of the variable
+    VarType vt = VarType::Void;
+    /// Optional evaluation state of the variable
+    VarState vs = VarState::Invalid;
+    uint32_t flags = 0;
+    /// The literal data
+    uint64_t literal = 0;
+    // Optional size when storing literals
+    uint32_t literal_size = 0;
+
+    bool operator==(const VarLayout &rhs) const;
+
+    VarLayout() = default;
+
+    VarLayout(const VarLayout &)            = delete;
+    VarLayout &operator=(const VarLayout &) = delete;
+
+    VarLayout(VarLayout &&)            = default;
+    VarLayout &operator=(VarLayout &&) = default;
+};
+
 
 // Additional context required when traversing the inputs
 struct TraverseContext {
     /// Set of postponed ad nodes, used to mark inputs to functions.
     const tsl::robin_set<uint32_t, UInt32Hasher> *postponed = nullptr;
+    bool schedule_force                                     = false;
 };
 
 /**
@@ -99,6 +120,7 @@ struct FlatVariables {
     /// The flattened and de-duplicated variable indices of the input/output to
     /// a frozen function
     std::vector<uint32_t> variables;
+    std::vector<VarLayout> var_layout;
     /// Mapping from drjit variable index to index in flat variables
     tsl::robin_map<uint32_t, uint32_t, UInt32Hasher> index_to_slot;
 
@@ -168,6 +190,61 @@ struct FlatVariables {
     void release() {
         for (uint32_t &index : this->variables)
             jit_var_dec_ref(index);
+    }
+    void eval() {
+        nb::gil_scoped_release guard;
+        jit_eval();
+
+        assert(var_info.size() ==  variables.size());
+        for (uint32_t i = 0; i < var_layout.size(); i++) {
+            uint32_t index = variables[i];
+
+            auto &layout = var_layout[i];
+
+            auto info = jit_set_backend(index);
+
+            if (backend == info.backend || this->backend == JitBackend::None) {
+                backend = info.backend;
+            } else {
+                jit_raise("freeze(): backend missmatch error (backend of this "
+                          "variable %s does not match backend of others %s)!",
+                          info.backend == JitBackend::CUDA ? "CUDA" : "LLVM",
+                          backend == JitBackend::CUDA ? "CUDA" : "LLVM");
+            }
+
+            if (info.type == VarType::Pointer) {
+                // We do not support pointers as inputs. It might be possible
+                // with some extra handling, but they are never used directly.
+                jit_raise("Pointer inputs not supported!");
+            }
+
+            layout.vs         = info.state;
+            layout.vt         = info.type;
+            layout.size_index = this->add_size(info.size);
+
+            if (info.state == VarState::Literal) {
+                // Special case, where the variable is a literal. This should
+                // not occur, as all literals are made opaque in beforehand,
+                // however it is nice to have a fallback.
+                layout.literal = info.literal;
+                // Store size in index variable, as this is not used for
+                // literals
+                layout.literal_size = info.size;
+            }
+            else if (info.state == VarState::Evaluated) {
+                // Special case, handling evaluated/opaque variables.
+
+                layout.flags |=
+                    (info.size == 1 ? (uint32_t) JitLayoutFlag::SingletonArray : 0);
+                layout.flags |=
+                    (info.unaligned ? (uint32_t) JitLayoutFlag::Unaligned : 0);
+
+            } else {
+                jit_raise(
+                    "collect(): found variable %u in unsupported state %u!",
+                    index, (uint32_t) info.state);
+            }
+        }
     }
 
     Heuristic heuristic() {
@@ -319,11 +396,14 @@ struct FlatVariables {
 
 struct RecordingKey {
     std::vector<Layout> layout;
+    std::vector<VarLayout> var_layout;
     uint32_t flags;
 
     RecordingKey() {}
-    RecordingKey(std::vector<Layout> layout, uint32_t flags)
-        : layout(std::move(layout)), flags(flags) {}
+    RecordingKey(std::vector<Layout> layout, std::vector<VarLayout> var_layout,
+                 uint32_t flags)
+        : layout(std::move(layout)), var_layout(std::move(var_layout)),
+          flags(flags) {}
 
     RecordingKey(const RecordingKey &)          = delete;
     RecordingKey &operator=(const RecordingKey) = delete;
@@ -377,14 +457,14 @@ struct FunctionRecording {
      * Record a function, given it's python input and flattened input.
      */
     nb::object record(nb::callable func, FrozenFunction *frozen_func,
-                      nb::list input, const FlatVariables &in_variables);
+                      nb::list input, FlatVariables &in_variables);
     /*
      * Replays the recording.
      *
      * This constructs the output and re-assigns the input.
      */
     nb::object replay(nb::callable func, FrozenFunction *frozen_func,
-                      nb::list input, const FlatVariables &in_variables);
+                      nb::list input, FlatVariables &in_variables);
 };
 
 using RecordingMap = tsl::robin_map<std::shared_ptr<RecordingKey>,
