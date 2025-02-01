@@ -1234,183 +1234,6 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
 
 }
 
-/**
- * Schedules all variables in this PyTree, including the ones in C++ objects
- * traversable through the `traverse_1_cb_rw` methods. It uses
- * ``jit_var_schedule_force`` to force evaluation of literals. This function is
- * called before traversing the inputs and outputs of a frozen function. Inputs
- * and outputs have to be scheduled, since we use pointers to track variables,
- * so all variables have to be evaluated.
- *
- * \param eval
- *     If this boolean is set to ``true``, ``jit_eval`` is called if variables
- *     have been scheduled. If it is set to ``false``, we only schedule the
- *     variables.
- *
- * \param registry
- *     Boolean, indicating whether we should schedule the registry as well.
- */
-static void deep_make_opaque(nb::handle h, bool eval = true,
-                             bool registry = false) {
-    jit_log(LogLevel::Debug, "make_opaque");
-
-    struct ScheduleForceCallback : TraverseCallback {
-        bool result = false;
-        // NOTE: this is a really common pattern throughout my code, which could
-        // be resolved by making the ``traverse_cb_rw`` steal the index and not
-        // borrow it.
-        index64_vector release_list;
-
-        void operator()(nb::handle h) override {
-            const ArraySupplement &s = supp(h.type());
-            if (s.index)
-                s.reset_index(operator()(s.index(inst_ptr(h))), inst_ptr(h));
-        }
-
-        uint64_t operator()(uint64_t index, const char * /*variant*/ = nullptr,
-                            const char * /*domain*/ = nullptr) override {
-            if (!index)
-                return index;
-            uint64_t new_index;
-            //         (uint32_t) (index >> 32), (uint32_t) index);
-            if (ad_grad_enabled(index)) {
-
-                uint32_t grad = ad_grad(index);
-
-                int rv    = 0;
-                new_index = ad_var_schedule_force(index, &rv);
-                if (rv) {
-                    jit_log(LogLevel::Debug,
-                            "   scheduled ad-variable a%u, r%u -> a%u, r%u",
-                            (uint32_t) (index >> 32), (uint32_t) index,
-                            (uint32_t) (new_index >> 32), (uint32_t) new_index);
-                    result = true;
-                }
-
-                rv                = 0;
-                uint32_t new_grad = jit_var_schedule_force(grad, &rv);
-                jit_var_dec_ref(grad);
-                if (rv) {
-                    jit_log(LogLevel::Debug,
-                            "    scheduled gradient r%u -> r%u", grad,
-                            new_grad);
-                    result = true;
-                }
-
-                ad_clear_grad(new_index);
-                ad_accum_grad(new_index, new_grad);
-                jit_var_dec_ref(new_grad);
-            } else {
-                int rv    = 0;
-                new_index = ad_var_schedule_force(index, &rv);
-                if (rv) {
-                    jit_log(LogLevel::Debug,
-                            "   scheduled variable r%u, label=%s -> r%u",
-                            (uint32_t) index, jit_var_label(index),
-                            (uint32_t) new_index);
-                    result = true;
-                }
-            }
-
-            release_list.push_back_steal(new_index);
-            return new_index;
-        }
-    };
-
-    ScheduleForceCallback op;
-    if (registry)
-        traverse_with_registry("schedule_force", op, h, true);
-    else
-        traverse("schedule_force", op, h, true);
-
-    if (op.result && eval) {
-        nb::gil_scoped_release guard;
-        jit_eval();
-    }
-}
-
-/**
- * Similarly to ``deep_make_opaque`` this function schedules all variables in
- * the PyTree, including the C++ objects. However, it uses ``jitc_var_schedule``
- * instead of ``jitc_ar_schedule_force``, not evaluating literals. This function
- * is used to evaluate the output of frozen functions.
- *
- * \param eval
- *     If this boolean is set to ``true``, ``jit_eval`` is called if variables
- *     have been scheduled. If it is set to ``false``, we only schedule the
- *     variables.
- *
- * \param registry
- *     Boolean, indicating whether we should schedule the registry as well.
- */
-static void deep_eval(nb::handle h, bool eval = true) {
-    jit_log(LogLevel::Debug, "deep eval");
-
-    struct ScheduleCallback : TraverseCallback {
-        bool result = false;
-        // NOTE: this is a really common pattern throughout my code, which could
-        // be resolved by making the ``traverse_cb_rw`` steal the index and not
-        // borrow it.
-        index64_vector release_list;
-
-        void operator()(nb::handle h) override {
-            const ArraySupplement &s = supp(h.type());
-            if (s.index)
-                s.reset_index(operator()(s.index(inst_ptr(h)), nullptr,
-                                         nullptr),
-                              inst_ptr(h));
-        }
-
-        uint64_t operator()(uint64_t index, const char * /*variant*/,
-                            const char * /*domain*/) override {
-            if (ad_grad_enabled(index)) {
-                int rv = 0;
-
-                if (jit_var_schedule(index)) {
-                    jit_log(LogLevel::Debug,
-                            "   scheduled ad-variable a%u, r%u, label=%s",
-                            (uint32_t) (index >> 32), (uint32_t) index,
-                            jit_var_label(index));
-                    result = true;
-                }
-
-                uint32_t grad = ad_grad(index);
-                if (jit_var_schedule(grad)) {
-                    jit_log(LogLevel::Debug,
-                            "    scheduled gradient r%u, label=%s", grad,
-                            jit_var_label(grad));
-                    result = true;
-                }
-                jit_var_dec_ref(grad);
-
-            } else {
-                int rv = jit_var_schedule(index);
-                if (rv) {
-                    jit_log(LogLevel::Debug,
-                            "   scheduled variable r%u, label=%s",
-                            (uint32_t) index, jit_var_label(index));
-                    result = true;
-                }
-            }
-            ad_var_inc_ref(index);
-
-            jit_log(LogLevel::Debug, "    scheduled a%u r%u",
-                    (uint32_t) (index >> 32), (uint32_t) index);
-
-            release_list.push_back_steal(index);
-            return index;
-        }
-    };
-
-    ScheduleCallback op;
-    traverse("deep_eval", op, h, true);
-
-    if (op.result && eval) {
-        nb::gil_scoped_release guard;
-        jit_eval();
-    }
-}
-
 std::ostream &operator<<(std::ostream &os, const RecordingKey &r) {
     std::string offset = "    ";
 
@@ -1499,36 +1322,6 @@ nb::object FunctionRecording::record(nb::callable func,
         output = func(*input[0], **input[1]);
     }
 
-    // output.append(result);
-    // output.append(input);
-
-    // Eval the input and output and it's gradients.
-    jit_log(LogLevel::Debug, "Evaluating output:");
-    {
-        ProfilerPhase profiler("evaluate input + output");
-        // Enter Resume scope, so we can track gradients
-        ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, -1, false);
-        {
-            ProfilerPhase profiler("schedule input");
-            deep_make_opaque(input, false, true);
-        }
-        {
-            ProfilerPhase profiler("schedule output");
-            deep_eval(output, false);
-        }
-        {
-            nb::gil_scoped_release guard;
-            jit_eval();
-        }
-    }
-
-    // Pause recording before traversal as to not accidentally record
-    // unwanted operations.
-    jit_freeze_pause(backend);
-
-    // TODO: validate, that gradients wheren't enabled for inputs inside the
-    // frozen function.
-
     // Collect nodes, that have been postponed by the `Isolate` scope in a
     // hash set.
     // These are the targets of postponed edges, as the isolate gradient
@@ -1555,8 +1348,16 @@ nb::object FunctionRecording::record(nb::callable func,
         out_variables.traverse(output, ctx);
         ctx.schedule_force = true;
         out_variables.traverse_with_registry(input, ctx);
+
+        {
+            nb::gil_scoped_release guard;
+            jit_eval();
+        }
+
         out_variables.record_jit_indices();
     }
+
+    jit_freeze_pause(backend);
 
     if ((out_variables.variables.size() > 0 &&
          in_variables.variables.size() > 0) &&
@@ -1687,16 +1488,6 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             // Enter Resume scope, so we can track gradients
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, 0,
                                     true);
-            // Evaluate input variables, forcing evaluation of undefined
-            // variables
-            // {
-            //     ProfilerPhase profiler("evaluate input");
-            //     deep_make_opaque(input, true, true);
-            // }
-            // {
-            //     nb::gil_scoped_release guard;
-            //     jit_eval();
-            // }
 
             // Traverse input variables
             ProfilerPhase profiler("traverse input");
@@ -1704,10 +1495,12 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             TraverseContext ctx;
             ctx.schedule_force = true;
             in_variables.traverse_with_registry(input, ctx);
+
             { // Eval the variables, scheduled when traversing
                 nb::gil_scoped_release guard;
                 jit_eval();
             }
+
             in_variables.record_jit_indices();
             // In order to prevent issues with scattering, we borrow all input
             // variables, incrementing their refcount.
