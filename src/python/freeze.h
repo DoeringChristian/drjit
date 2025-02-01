@@ -111,6 +111,8 @@ struct TraverseContext {
  */
 struct FlatVariables {
 
+    uint32_t flags = 0;
+
     // Index, used to iterate over the variables/layouts when constructing
     // python objects
     uint32_t layout_index = 0;
@@ -344,39 +346,44 @@ struct FlatVariables {
      * Corresponds to `traverse_with_registry`.
      */
     void assign_with_registry(nb::handle dst);
-};
 
-struct RecordingKey {
-    std::vector<Layout> layout;
-    std::vector<VarLayout> var_layout;
-    uint32_t flags;
-
-    RecordingKey() {}
-    RecordingKey(std::vector<Layout> layout, std::vector<VarLayout> var_layout,
-                 uint32_t flags)
-        : layout(std::move(layout)), var_layout(std::move(var_layout)),
-          flags(flags) {}
-
-    RecordingKey(const RecordingKey &)          = delete;
-    RecordingKey &operator=(const RecordingKey) = delete;
-
-    RecordingKey(RecordingKey &&)            = default;
-    RecordingKey &operator=(RecordingKey &&) = default;
-
-    bool operator==(const RecordingKey &rhs) const {
+    bool operator==(const FlatVariables &rhs) const {
         return this->layout == rhs.layout &&
                this->var_layout == rhs.var_layout && this->flags == rhs.flags;
     }
 };
 
+// struct RecordingKey {
+//     std::vector<Layout> layout;
+//     std::vector<VarLayout> var_layout;
+//     uint32_t flags;
+//
+//     RecordingKey() {}
+//     RecordingKey(std::vector<Layout> layout, std::vector<VarLayout> var_layout,
+//                  uint32_t flags)
+//         : layout(std::move(layout)), var_layout(std::move(var_layout)),
+//           flags(flags) {}
+//
+//     RecordingKey(const RecordingKey &)          = delete;
+//     RecordingKey &operator=(const RecordingKey) = delete;
+//
+//     RecordingKey(RecordingKey &&)            = default;
+//     RecordingKey &operator=(RecordingKey &&) = default;
+//
+//     bool operator==(const RecordingKey &rhs) const {
+//         return this->layout == rhs.layout &&
+//                this->var_layout == rhs.var_layout && this->flags == rhs.flags;
+//     }
+// };
+
 struct RecordingKeyHasher {
-    size_t operator()(const std::shared_ptr<RecordingKey> &key) const;
+    size_t operator()(const std::shared_ptr<FlatVariables> &key) const;
 };
 
 struct RecordingKeyEqual{
     using is_transparent = void;
-    bool operator()(const std::shared_ptr<RecordingKey> &lhs,
-                    const std::shared_ptr<RecordingKey> &rhs) const {
+    bool operator()(const std::shared_ptr<FlatVariables> &lhs,
+                    const std::shared_ptr<FlatVariables> &rhs) const {
         return *lhs.get() == *rhs.get();
     }
 };
@@ -420,7 +427,7 @@ struct FunctionRecording {
                       nb::list input, const FlatVariables &in_variables);
 };
 
-using RecordingMap = tsl::robin_map<std::shared_ptr<RecordingKey>,
+using RecordingMap = tsl::robin_map<std::shared_ptr<FlatVariables>,
                                     std::unique_ptr<FunctionRecording>,
                                     RecordingKeyHasher, RecordingKeyEqual>;
 
@@ -430,7 +437,7 @@ struct FrozenFunction {
     nb::callable func;
 
     detail::RecordingMap recordings;
-    std::shared_ptr<detail::RecordingKey> prev_key;
+    std::shared_ptr<detail::FlatVariables> prev_key;
     uint32_t recording_counter = 0;
 
     detail::FlatVariables::Heuristic in_heuristics;

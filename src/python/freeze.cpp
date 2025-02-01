@@ -1241,26 +1241,26 @@ static void traverse_with_registry(const char *op, TraverseCallback &tc,
 
 }
 
-std::ostream &operator<<(std::ostream &os, const RecordingKey &r) {
-    std::string offset = "    ";
-
-    os << "RecordingKey[" << std::endl;
-    os << "    flags = " << r.flags << std::endl;
-
-    std::string padding("    ");
-    uint32_t index = 0;
-
-    os << padding << "Layout[" << std::endl;
-
-    padding.append("    ");
-    log_layouts(r.layout, os, index, padding);
-    padding.resize(padding.length() - 4);
-
-    os << padding << "]" << std::endl;
-
-    os << "]" << std::endl;
-    return os;
-}
+// std::ostream &operator<<(std::ostream &os, const FlatVariables &r) {
+//     std::string offset = "    ";
+//
+//     os << "RecordingKey[" << std::endl;
+//     os << "    flags = " << r.flags << std::endl;
+//
+//     std::string padding("    ");
+//     uint32_t index = 0;
+//
+//     os << padding << "Layout[" << std::endl;
+//
+//     padding.append("    ");
+//     log_layouts(r.layout, os, index, padding);
+//     padding.resize(padding.length() - 4);
+//
+//     os << padding << "]" << std::endl;
+//
+//     os << "]" << std::endl;
+//     return os;
+// }
 
 inline void hash_combine(size_t &seed, size_t value) {
     /// From CityHash (https://github.com/google/cityhash)
@@ -1273,7 +1273,7 @@ inline void hash_combine(size_t &seed, size_t value) {
 }
 
 size_t
-RecordingKeyHasher::operator()(const std::shared_ptr<RecordingKey> &key) const {
+RecordingKeyHasher::operator()(const std::shared_ptr<FlatVariables> &key) const {
     ProfilerPhase profiler("hash");
     // Hash the layout
     // NOTE: string hashing seems to be less efficient
@@ -1489,7 +1489,8 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
         input.append(args);
         input.append(kwargs);
 
-        FlatVariables in_variables(in_heuristics);
+        auto in_variables =
+            std::make_shared<FlatVariables>(FlatVariables(in_heuristics));
         // Evaluate and traverse input variables (args and kwargs)
         {
             // Enter Resume scope, so we can track gradients
@@ -1501,14 +1502,14 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             jit_log(LogLevel::Info, "freeze(): Traversing input");
             TraverseContext ctx;
             ctx.schedule_force = true;
-            in_variables.traverse_with_registry(input, ctx);
+            in_variables->traverse_with_registry(input, ctx);
 
             { // Evaluate the variables, scheduled when traversing
                 nb::gil_scoped_release guard;
                 jit_eval();
             }
 
-            in_variables.record_jit_indices();
+            in_variables->record_jit_indices();
             // In order to prevent issues with scattering, we borrow all input
             // variables, incrementing their refcount.
             // NOTE: already borrowed
@@ -1520,10 +1521,10 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             // TODO: single traverse
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, 0,
                                     true);
-            in_variables.assign_with_registry(input);
+            in_variables->assign_with_registry(input);
         }
 
-        in_heuristics = in_heuristics.max(in_variables.heuristic());
+        in_heuristics = in_heuristics.max(in_variables->heuristic());
 
         // for (uint32_t i = 0; i < 10000; i++){
         //     FlatVariables vars;
@@ -1535,15 +1536,14 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
         //             vars.layout.size());
         // }
 
-        raise_if(in_variables.backend == JitBackend::None,
+        raise_if(in_variables->backend == JitBackend::None,
                  "freeze(): Cannot infer backend without providing input "
                  "variable to frozen function!");
 
-        uint32_t flags = jit_flags();
-        auto key       = std::make_shared<RecordingKey>(
-            RecordingKey(std::move(in_variables.layout),
-                               std::move(in_variables.var_layout), flags));
-        auto it = this->recordings.find(key);
+        // uint32_t flags = jit_flags();
+        // auto key       = std::make_shared<FlatVariables>(
+        //     RecordingKey(in_variables.layout, in_variables.var_layout, flags));
+        auto it = this->recordings.find(in_variables);
 
         if (it == this->recordings.end()) {
 #ifndef NDEBUG
@@ -1566,36 +1566,37 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             auto recording = std::make_unique<FunctionRecording>();
 
             try {
-                result = recording->record(func, this, input, in_variables);
+                result = recording->record(func, this, input, *in_variables);
             } catch (nb::python_error &e) {
-                in_variables.release();
-                jit_freeze_abort(in_variables.backend);
+                in_variables->release();
+                jit_freeze_abort(in_variables->backend);
                 nb::raise_from(
                     e, PyExc_RuntimeError,
                     "record(): error encountered while recording a frozen"
                     "function (see above).");
             } catch (const std::exception &e) {
-                in_variables.release();
-                jit_freeze_abort(in_variables.backend);
+                in_variables->release();
+                jit_freeze_abort(in_variables->backend);
 
                 nb::chain_error(PyExc_RuntimeError, "record(): %s", e.what());
                 nb::raise_python_error();
             };
 
-            in_variables.release();
+            in_variables->release();
 
-            this->prev_key = key;
-            this->recordings.insert({ std::move(key), std::move(recording) });
+            this->prev_key = in_variables;
+            this->recordings.insert(
+                { std::move(in_variables), std::move(recording) });
 
         } else {
             FunctionRecording *recording = it.value().get();
 
             {
-                result = recording->replay(func, this, input, in_variables);
+                result = recording->replay(func, this, input, *in_variables);
             }
 
             // Drop references to variables
-            in_variables.release();
+            in_variables->release();
         }
     }
     ad_traverse(drjit::ADMode::Backward,
@@ -1605,7 +1606,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
 
 void FrozenFunction::clear() {
     recordings.clear();
-    prev_key          = std::make_shared<RecordingKey>(RecordingKey());
+    prev_key          = std::make_shared<FlatVariables>(FlatVariables());
     recording_counter = 0;
 }
 
