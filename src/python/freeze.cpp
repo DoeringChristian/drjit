@@ -77,6 +77,27 @@ bool Layout::operator==(const Layout &rhs) const {
         if (!(this->fields[i].equal(rhs.fields[i])))
             return false;
     }
+
+    if (this->index != rhs.index)
+        return false;
+
+    if (this->flags != rhs.flags)
+        return false;
+
+    if (this->literal != rhs.literal)
+        return false;
+
+    if (this->vt != rhs.vt)
+        return false;
+
+    if (((bool) this->py_object != (bool) rhs.py_object) ||
+        !this->py_object.equal(rhs.py_object))
+        return false;
+
+    return true;
+}
+
+bool VarLayout::operator==(const VarLayout &rhs) const {
     if (this->vt != rhs.vt)
         return false;
 
@@ -86,17 +107,7 @@ bool Layout::operator==(const Layout &rhs) const {
     if (this->flags != rhs.flags)
         return false;
 
-    if (this->index != rhs.index)
-        return false;
-
     if (this->size_index != rhs.size_index)
-        return false;
-
-    if (this->literal != rhs.literal)
-        return false;
-
-    if (((bool) this->py_object != (bool) rhs.py_object) ||
-        !this->py_object.equal(rhs.py_object))
         return false;
 
     return true;
@@ -109,12 +120,12 @@ static void log_layouts(const std::vector<Layout> &layouts, std::ostream &os,
     auto tp_name = layout.type ? nb::type_name(layout.type).c_str() : "None";
     os << padding << "type = " << tp_name << std::endl;
     os << padding << "num: " << layout.num << std::endl;
-    os << padding << "vt: " << (uint32_t) layout.vt << std::endl;
-    os << padding << "vs: " << (uint32_t) layout.vs << std::endl;
+    // os << padding << "vt: " << (uint32_t) layout.vt << std::endl;
+    // os << padding << "vs: " << (uint32_t) layout.vs << std::endl;
     os << padding << "flats: " << std::bitset<8>(layout.flags) << std::endl;
-    os << padding << "literal: " << std::hex << layout.literal << std::endl;
+    // os << padding << "literal: " << std::hex << layout.literal << std::endl;
     os << padding << "index: " << layout.index << std::endl;
-    os << padding << "size_index: " << layout.size_index << std::endl;
+    // os << padding << "size_index: " << layout.size_index << std::endl;
     os << padding << "py_object: " << nb::str(layout.py_object).c_str()
        << std::endl;
 
@@ -175,14 +186,49 @@ void FlatVariables::add_domain(const char *variant, const char *domain) {
  * This allows for checking for aliasing conditions, as aliasing inputs map
  * to the same flat variable index.
  */
-uint32_t FlatVariables::add_variable_index(uint32_t variable_index) {
+uint32_t FlatVariables::add_variable_index(uint32_t index) {
     uint32_t next_slot = this->variables.size();
-    auto result   = this->index_to_slot.try_emplace(variable_index, next_slot);
-    auto it       = result.first;
+    auto result        = this->index_to_slot.try_emplace(index, next_slot);
+    auto it            = result.first;
     bool inserted = result.second;
 
     if (inserted) {
-        this->variables.push_back(variable_index);
+        this->variables.push_back(index);
+        VarLayout &layout = this->var_layout.emplace_back();
+
+        VarInfo info = jit_set_backend(index);
+
+        if (backend == info.backend || this->backend == JitBackend::None) {
+            backend = info.backend;
+        } else {
+            jit_raise("freeze(): backend missmatch error (backend of this "
+                      "variable %s does not match backend of others %s)!",
+                      info.backend == JitBackend::CUDA ? "CUDA" : "LLVM",
+                      backend == JitBackend::CUDA ? "CUDA" : "LLVM");
+        }
+
+        if (info.type == VarType::Pointer) {
+            // We do not support pointers as inputs. It might be possible with
+            // some extra handling, but they are never used directly.
+            jit_raise("Pointer inputs not supported!");
+        }
+
+        layout.vs = info.state;
+        layout.vt = info.type;
+        layout.size_index = this->add_size(info.size);
+
+        if (info.state == VarState::Evaluated) {
+            // Special case, handling evaluated/opaque variables.
+
+            layout.flags |=
+                (info.size == 1 ? (uint32_t) LayoutFlag::SingletonArray : 0);
+            layout.flags |= (info.unaligned ? (uint32_t) LayoutFlag::Unaligned : 0);
+
+        } else {
+            jit_raise("collect(): found variable %u in unsupported state %u!",
+                      index, (uint32_t) info.state);
+        }
+
         return next_slot;
     } else {
         return it.value();
@@ -223,53 +269,23 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
     (void) ctx;
     Layout &layout = this->layout.emplace_back();
 
-    VarInfo info           = jit_set_backend(index);
-    JitBackend var_backend = info.backend;
-    VarType vt             = info.type;
-    uint32_t var_size      = info.size;
-    VarState vs = info.state;
-    bool unaligned = info.unaligned;
-
-    if (backend == var_backend || this->backend == JitBackend::None) {
-        backend = var_backend;
-    } else {
-        jit_raise("freeze(): backend missmatch error (backend of this "
-                  "variable %s does not match backend of others %s)!",
-                  var_backend == JitBackend::CUDA ? "CUDA" : "LLVM",
-                  backend == JitBackend::CUDA ? "CUDA" : "LLVM");
-    }
-
-    if (vt == VarType::Pointer) {
-        // We do not support pointers as inputs. It might be possible with
-        // some extra handling, but they are never used directly.
-        jit_raise("Pointer inputs not supported!");
-    }
-
     if (tp)
         layout.type = nb::borrow<nb::type_object>(tp);
-    layout.vs         = vs;
-    layout.vt         = vt;
-    layout.size_index = this->add_size(var_size);
 
-    if (vs == VarState::Literal) {
+    VarInfo info = jit_set_backend(index);
+
+    if (info.state == VarState::Literal) {
         // Special case, where the variable is a literal. This should not
         // occur, as all literals are made opaque in beforehand, however it
         // is nice to have a fallback.
         layout.literal = info.literal;
         // Store size in index variable, as this is not used for literals
-        layout.index = var_size;
-    } else if (vs == VarState::Evaluated) {
-        // Special case, handling evaluated/opaque variables.
+        layout.index = info.size;
+        layout.vt    = info.type;
 
+        layout.flags |= (uint32_t) LayoutFlag::Literal;
+    }else{
         layout.index = this->add_variable_index(index);
-
-        layout.flags |=
-            (var_size == 1 ? (uint32_t) LayoutFlag::SingletonArray : 0);
-        layout.flags |= (unaligned ? (uint32_t) LayoutFlag::Unaligned : 0);
-
-    } else {
-        jit_raise("collect(): found variable %u in unsupported state %u!",
-                  index, (uint32_t) vs);
     }
 }
 
@@ -279,9 +295,10 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
  */
 uint32_t FlatVariables::construct_jit_index(uint32_t prev_index) {
     Layout &layout = this->layout[layout_index++];
+    VarLayout &var_layout = this->var_layout[layout.index];
 
     uint32_t index;
-    if (layout.vs == VarState::Literal) {
+    if (layout.flags & (uint32_t) LayoutFlag::Literal) {
         index = jit_var_literal(this->backend, layout.vt, &layout.literal,
                                 layout.index);
 
@@ -294,11 +311,12 @@ uint32_t FlatVariables::construct_jit_index(uint32_t prev_index) {
     }
 
     if (prev_index) {
-        if (layout.vt != (VarType) jit_var_type(prev_index))
+        if (var_layout.vt != (VarType) jit_var_type(prev_index))
             jit_fail("VarType missmatch %u != %u while assigning (r%u) "
                      "-> (r%u)!",
-                     (uint32_t) layout.vt, (uint32_t) jit_var_type(prev_index),
-                     (uint32_t) prev_index, (uint32_t) index);
+                     (uint32_t) var_layout.vt,
+                     (uint32_t) jit_var_type(prev_index), (uint32_t) prev_index,
+                     (uint32_t) index);
     }
     return index;
 }
@@ -326,7 +344,7 @@ void FlatVariables::traverse_ad_index(uint64_t index, TraverseContext &ctx,
         if (tp)
             layout.type = nb::borrow<nb::type_object>(tp);
         layout.num = 2;
-        layout.vt  = jit_var_type(index);
+        // layout.vt  = jit_var_type(index);
 
         // Set flags
         layout.flags |= (uint32_t) LayoutFlag::GradEnabled;
@@ -366,8 +384,8 @@ uint64_t FlatVariables::construct_ad_index(uint32_t shrink,
         Layout &layout = this->layout[this->layout_index++];
         bool postponed = (layout.flags & (uint32_t) LayoutFlag::Postponed);
 
-        uint32_t val = construct_jit_index();
-        uint32_t grad = construct_jit_index();
+        uint32_t val = construct_jit_index(prev_index);
+        uint32_t grad = construct_jit_index(prev_index);
 
         // Resize the gradient if it is a literal
         if ((VarState) jit_var_state(grad) == VarState::Literal) {
@@ -401,15 +419,15 @@ uint64_t FlatVariables::construct_ad_index(uint32_t shrink,
             ad_enqueue(drjit::ADMode::Backward, index);
         }
 
-        if (prev_index) {
-            if (layout.vt != (VarType) jit_var_type(prev_index))
-                jit_fail(
-                    "VarType missmatch %u != %u while assigning (a%u, r%u) "
-                    "-> (a%u, r%u)!",
-                    (uint32_t) layout.vt, (uint32_t) jit_var_type(prev_index),
-                    (uint32_t) (prev_index >> 32), (uint32_t) prev_index,
-                    (uint32_t) (index >> 32), (uint32_t) index);
-        }
+        // if (prev_index) {
+        //     if (layout.vt != (VarType) jit_var_type(prev_index))
+        //         jit_fail(
+        //             "VarType missmatch %u != %u while assigning (a%u, r%u) "
+        //             "-> (a%u, r%u)!",
+        //             (uint32_t) layout.vt, (uint32_t) jit_var_type(prev_index),
+        //             (uint32_t) (prev_index >> 32), (uint32_t) prev_index,
+        //             (uint32_t) (index >> 32), (uint32_t) index);
+        // }
     } else {
         index = construct_jit_index(prev_index);
     }
@@ -600,7 +618,7 @@ void FlatVariables::traverse(nb::handle h, TraverseContext &ctx) {
                 nb::handle array = s.tensor_array(h.ptr());
 
                 layout.py_object = shape(h);
-                layout.literal   = width(array);
+                layout.index   = width(array);
 
                 traverse(nb::steal(array), ctx);
             } else if (s.ndim != 1) {
@@ -1413,12 +1431,10 @@ RecordingKeyHasher::operator()(const std::shared_ptr<RecordingKey> &key) const {
     for (const Layout &layout : key->layout) {
         hash_combine(hash, layout.num);
         hash_combine(hash, layout.fields.size());
-        hash_combine(hash, (size_t) layout.vt);
-        hash_combine(hash, (size_t) layout.vs);
         hash_combine(hash, (size_t) layout.flags);
-        hash_combine(hash, (size_t) layout.literal);
         hash_combine(hash, (size_t) layout.index);
-        hash_combine(hash, (size_t) layout.size_index);
+        hash_combine(hash, (size_t) layout.literal);
+        hash_combine(hash, (size_t) layout.vt);
         if (layout.type)
             hash_combine(hash, nb::hash(layout.type));
         if (layout.py_object)
@@ -1426,6 +1442,13 @@ RecordingKeyHasher::operator()(const std::shared_ptr<RecordingKey> &key) const {
         for (auto &field : layout.fields) {
             hash_combine(hash, nb::hash(field));
         }
+    }
+
+    for (const VarLayout &layout : key->var_layout) {
+        hash_combine(hash, (size_t) layout.vt);
+        hash_combine(hash, (size_t) layout.vs);
+        hash_combine(hash, (size_t) layout.flags);
+        hash_combine(hash, (size_t) layout.size_index);
     }
 
     hash_combine(hash, (size_t) key->flags);
@@ -1684,8 +1707,10 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
                  "variable to frozen function!");
 
         uint32_t flags = jit_flags();
-        auto key       = std::make_shared<RecordingKey>(RecordingKey(std::move(in_variables.layout), flags));
-        auto it        = this->recordings.find(key);
+        auto key       = std::make_shared<RecordingKey>(
+            RecordingKey(std::move(in_variables.layout),
+                               std::move(in_variables.var_layout), flags));
+        auto it = this->recordings.find(key);
 
         if (it == this->recordings.end()) {
 #ifndef NDEBUG

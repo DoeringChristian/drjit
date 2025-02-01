@@ -29,11 +29,12 @@ enum class LayoutFlag : uint32_t {
     SingletonArray = (1 << 0),
     /// Whether this variable is unaligned in memory
     Unaligned = (1 << 1),
+    Literal   = (1 << 2),
     /// Whether this variable has gradients enabled
-    GradEnabled = (1 << 2),
+    GradEnabled = (1 << 3),
     /// Did this variable have gradient edges attached when recording, that
     /// where postponed by the ``isolate_grad`` function?
-    Postponed = (1 << 3),
+    Postponed = (1 << 4),
 };
 
 /// Stores information about python objects, such as their type, their number of
@@ -46,20 +47,15 @@ struct Layout {
     /// Optional field identifiers of the container
     /// for example: keys in dictionary
     std::vector<nb::object> fields;
-    /// Optional drjit type of the variable
-    VarType vt = VarType::Void;
-    /// Optional evaluation state of the variable
-    VarState vs = VarState::Invalid;
-    uint32_t flags = 0;
-    /// The literal data
-    uint64_t literal = 0;
     /// The index in the flat_variables array of this variable.
     /// This can be used to determine aliasing.
     uint32_t index = 0;
-    /// We have to track the condition, where two variables have the same size
-    /// during recording but don't when replaying.
-    /// Therefore we de-duplicate the size.
-    uint32_t size_index = 0;
+    uint32_t flags = 0;
+
+    /// The literal data
+    uint64_t literal = 0;
+    /// Optional drjit type of the variable
+    VarType vt = VarType::Void;
 
     /// If a non drjit type is passed as function arguments or result, we simply
     /// cache it here.
@@ -78,6 +74,28 @@ struct Layout {
 
     Layout(Layout &&)            = default;
     Layout &operator=(Layout &&) = default;
+};
+
+struct VarLayout{
+    /// Optional drjit type of the variable
+    VarType vt = VarType::Void;
+    /// Optional evaluation state of the variable
+    VarState vs = VarState::Invalid;
+    uint32_t flags = 0;
+    /// We have to track the condition, where two variables have the same size
+    /// during recording but don't when replaying.
+    /// Therefore we de-duplicate the size.
+    uint32_t size_index = 0;
+
+    VarLayout() = default;
+
+    VarLayout(const VarLayout &)            = delete;
+    VarLayout &operator=(const VarLayout &) = delete;
+
+    VarLayout(VarLayout &&)            = default;
+    VarLayout &operator=(VarLayout &&) = default;
+
+    bool operator==(const VarLayout &rhs) const;
 };
 
 
@@ -115,6 +133,7 @@ struct FlatVariables {
     /// This saves information about the type, size and fields of pytree
     /// objects. The information is stored in DFS order.
     std::vector<Layout> layout;
+    std::vector<VarLayout> var_layout;
     JitBackend backend = JitBackend::None;
     std::string variant;
     std::vector<std::string> domains;
@@ -319,11 +338,14 @@ struct FlatVariables {
 
 struct RecordingKey {
     std::vector<Layout> layout;
+    std::vector<VarLayout> var_layout;
     uint32_t flags;
 
     RecordingKey() {}
-    RecordingKey(std::vector<Layout> layout, uint32_t flags)
-        : layout(std::move(layout)), flags(flags) {}
+    RecordingKey(std::vector<Layout> layout, std::vector<VarLayout> var_layout,
+                 uint32_t flags)
+        : layout(std::move(layout)), var_layout(std::move(var_layout)),
+          flags(flags) {}
 
     RecordingKey(const RecordingKey &)          = delete;
     RecordingKey &operator=(const RecordingKey) = delete;
@@ -332,7 +354,8 @@ struct RecordingKey {
     RecordingKey &operator=(RecordingKey &&) = default;
 
     bool operator==(const RecordingKey &rhs) const {
-        return this->layout == rhs.layout && this->flags == rhs.flags;
+        return this->layout == rhs.layout &&
+               this->var_layout == rhs.var_layout && this->flags == rhs.flags;
     }
 };
 
