@@ -190,6 +190,13 @@ struct FlatVariables {
             jit_var_dec_ref(index);
     }
 
+    /**
+     * After traversing the PyTree, collecting non-literal indices in
+     * ``variables`` and evaluating the collected indices, we can collect
+     * information about the underlying variables that has to be used in the
+     * RecordingKey. This function iterates over the collected indices and
+     * collects that information.
+     */
     void record_jit_indices();
 
     Heuristic heuristic() {

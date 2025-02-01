@@ -203,6 +203,13 @@ uint32_t FlatVariables::add_variable_index(uint32_t index) {
     }
 }
 
+/**
+ * After traversing the PyTree, collecting non-literal indices in
+ * ``variables`` and evaluating the collected indices, we can collect
+ * information about the underlying variables that has to be used in the
+ * RecordingKey. This function iterates over the collected indices and
+ * collects that information.
+ */
 void FlatVariables::record_jit_indices() {
     assert(variables.size() == var_layout.size());
     for (uint32_t i = 0; i < var_layout.size(); i++){
@@ -1349,7 +1356,7 @@ nb::object FunctionRecording::record(nb::callable func,
         ctx.schedule_force = true;
         out_variables.traverse_with_registry(input, ctx);
 
-        {
+        { // Evaluate the variables, scheduled when traversing
             nb::gil_scoped_release guard;
             jit_eval();
         }
@@ -1496,7 +1503,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             ctx.schedule_force = true;
             in_variables.traverse_with_registry(input, ctx);
 
-            { // Eval the variables, scheduled when traversing
+            { // Evaluate the variables, scheduled when traversing
                 nb::gil_scoped_release guard;
                 jit_eval();
             }
