@@ -1142,126 +1142,6 @@ void traverse_traversable(drjit::TraversableBase *traversable,
     }
 }
 
-/**
- * Traverses the PyTree and all registry domains referenced in it.
- */
-static void traverse_with_registry(const char *op, TraverseCallback &tc,
-                                   nb::handle h, bool rw = false) {
-
-    // Determine domains, that have to be traversed, by traversing in read only mode
-
-    struct DomainTraverseCallback : TraverseCallback {
-
-        std::string variant;
-        std::vector<std::string> domains;
-        TraverseCallback *internal;
-
-        void add_domain(const char *variant, const char *domain) {
-            // Since it is not possible to pass nullptr strings to nanobind
-            // functions we
-            // assume, that a valid domain indicates a valid variant. If the
-            // variant is emtpy at the end of traversal, we know that no Class
-            // variable was traversed, and registry traversal is not necessary.
-            if (domain && variant && strcmp(domain, "") != 0) {
-                jit_log(LogLevel::Debug, "variant=%s, domain=%s", variant,
-                        domain);
-
-                if (domains.empty()) {
-                    this->variant = variant;
-                } else if (this->variant != variant)
-                    jit_raise(
-                        "traverse(): Variant missmatch! All arguments to a "
-                        "frozen function have to have the same variant. "
-                        "Variant %s of a previos argument does not match "
-                        "variant %s of this argument.",
-                        this->variant.c_str(), variant);
-
-                bool contains = false;
-                for (std::string &d : domains) {
-                    if (d == domain) {
-                        contains = true;
-                        break;
-                    }
-                }
-                if (!contains)
-                    domains.push_back(domain);
-    }
-        }
-
-        void operator()(nb::handle h) override {
-            const ArraySupplement &s = supp(h.type());
-            if (s.is_class && s.index) {
-                auto variant = nb::borrow<nb::str>(nb::getattr(h, "Variant"));
-                auto domain  = nb::borrow<nb::str>(nb::getattr(h, "Domain"));
-                add_domain(variant.c_str(), domain.c_str());
-
-            }
-            internal->operator()(h);
-        }
-        uint64_t operator()(uint64_t index, const char *variant,
-                            const char *domain) override {
-            add_domain(variant, domain);
-            return internal->operator()(index, variant, domain);
-        }
-    };
-    DomainTraverseCallback domain_callback;
-    domain_callback.internal = &tc;
-
-    traverse("traverse with registry", domain_callback, h);
-
-    // Traverse the registry
-    if (!domain_callback.domains.empty()) {
-        std::vector<void *> registry_pointers;
-        for (std::string &domain : domain_callback.domains) {
-            uint32_t registry_bound =
-                jit_registry_id_bound(domain_callback.variant.c_str(), domain.c_str());
-            uint32_t offset = registry_pointers.size();
-            registry_pointers.resize(registry_pointers.size() + registry_bound, nullptr);
-            jit_registry_get_pointers(domain_callback.variant.c_str(), domain.c_str(),
-                                      &registry_pointers[offset]);
-        }
-
-        for (void *ptr : registry_pointers) {
-            if (!ptr)
-                continue;
-
-            // WARN: very unsafe cast!
-            // We assume, that any object added to the registry inherits from
-            // TraversableBase. This is ensured by the signature of the
-            // ``drjit::registry_put`` function.
-            auto traversable = (drjit::TraversableBase *) ptr;
-            auto self        = traversable->self_py();
-
-            if (self)
-                traverse(op, tc, self, rw);
-            else
-                traverse_traversable(traversable, tc, rw);
-        }
-    }
-
-}
-
-// std::ostream &operator<<(std::ostream &os, const FlatVariables &r) {
-//     std::string offset = "    ";
-//
-//     os << "RecordingKey[" << std::endl;
-//     os << "    flags = " << r.flags << std::endl;
-//
-//     std::string padding("    ");
-//     uint32_t index = 0;
-//
-//     os << padding << "Layout[" << std::endl;
-//
-//     padding.append("    ");
-//     log_layouts(r.layout, os, index, padding);
-//     padding.resize(padding.length() - 4);
-//
-//     os << padding << "]" << std::endl;
-//
-//     os << "]" << std::endl;
-//     return os;
-// }
-
 inline void hash_combine(size_t &seed, size_t value) {
     /// From CityHash (https://github.com/google/cityhash)
     const size_t mult = 0x9ddfea08eb382d69ull;
@@ -1517,13 +1397,6 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
 
         }
 
-        {
-            // TODO: single traverse
-            ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, 0,
-                                    true);
-            in_variables->assign_with_registry(input);
-        }
-
         in_heuristics = in_heuristics.max(in_variables->heuristic());
 
         // for (uint32_t i = 0; i < 10000; i++){
@@ -1562,6 +1435,14 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
                         repr_prev.str().c_str());
             }
 #endif
+
+            {
+                // TODO: single traverse
+                ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, 0,
+                                        true);
+                in_variables->assign_with_registry(input);
+            }
+
             // FunctionRecording recording;
             auto recording = std::make_unique<FunctionRecording>();
 
