@@ -103,6 +103,7 @@ struct VarLayout{
 struct TraverseContext {
     /// Set of postponed ad nodes, used to mark inputs to functions.
     const tsl::robin_set<uint32_t, UInt32Hasher> *postponed = nullptr;
+    bool schedule_force                                     = false;
 };
 
 /**
@@ -188,6 +189,8 @@ struct FlatVariables {
         for (uint32_t &index : this->variables)
             jit_var_dec_ref(index);
     }
+
+    void record_jit_indices();
 
     Heuristic heuristic() {
         return Heuristic{

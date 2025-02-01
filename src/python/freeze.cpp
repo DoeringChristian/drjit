@@ -194,7 +194,20 @@ uint32_t FlatVariables::add_variable_index(uint32_t index) {
 
     if (inserted) {
         this->variables.push_back(index);
-        VarLayout &layout = this->var_layout.emplace_back();
+        // Borrow the variable
+        jit_var_inc_ref(index);
+        this->var_layout.emplace_back();
+        return next_slot;
+    } else {
+        return it.value();
+    }
+}
+
+void FlatVariables::record_jit_indices() {
+    assert(variables.size() == var_layout.size());
+    for (uint32_t i = 0; i < var_layout.size(); i++){
+        uint32_t index = variables[i];
+        VarLayout &layout = var_layout[i];
 
         VarInfo info = jit_set_backend(index);
 
@@ -228,10 +241,6 @@ uint32_t FlatVariables::add_variable_index(uint32_t index) {
             jit_raise("collect(): found variable %u in unsupported state %u!",
                       index, (uint32_t) info.state);
         }
-
-        return next_slot;
-    } else {
-        return it.value();
     }
 }
 
@@ -274,6 +283,16 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
 
     VarInfo info = jit_set_backend(index);
 
+    int rv = 0;
+    if (ctx.schedule_force)
+        // Returns owning reference
+        index = jit_var_schedule_force(index, &rv);
+    else{
+        // Schedule and create owning reference
+        rv = jit_var_schedule(index);
+        jit_var_inc_ref(index);
+    }
+
     if (info.state == VarState::Literal) {
         // Special case, where the variable is a literal. This should not
         // occur, as all literals are made opaque in beforehand, however it
@@ -284,9 +303,10 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
         layout.vt    = info.type;
 
         layout.flags |= (uint32_t) LayoutFlag::Literal;
-    }else{
+    } else {
         layout.index = this->add_variable_index(index);
     }
+    jit_var_dec_ref(index);
 }
 
 /**
@@ -1531,8 +1551,11 @@ nb::object FunctionRecording::record(nb::callable func,
 
         TraverseContext ctx;
         ctx.postponed = &postponed;
+        ctx.schedule_force = false;
         out_variables.traverse(output, ctx);
+        ctx.schedule_force = true;
         out_variables.traverse_with_registry(input, ctx);
+        out_variables.record_jit_indices();
     }
 
     if ((out_variables.variables.size() > 0 &&
@@ -1566,6 +1589,9 @@ nb::object FunctionRecording::record(nb::callable func,
         out_variables.assign(input);
         out_variables.layout_index = 0;
     }
+
+    // Traversal takes owning references, so here we need to release them.
+    out_variables.release();
 
     return output;
 }
@@ -1676,10 +1702,13 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             ProfilerPhase profiler("traverse input");
             jit_log(LogLevel::Debug, "freeze(): Traversing input.");
             TraverseContext ctx;
+            ctx.schedule_force = true;
             in_variables.traverse_with_registry(input, ctx);
+            in_variables.record_jit_indices();
             // In order to prevent issues with scattering, we borrow all input
             // variables, incrementing their refcount.
-            in_variables.borrow();
+            // NOTE: already borrowed
+            // in_variables.borrow();
 
         }
 
