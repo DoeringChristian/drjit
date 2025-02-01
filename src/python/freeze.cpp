@@ -1092,7 +1092,7 @@ void traverse_traversable(drjit::TraversableBase *traversable,
                                                       const char *variant,
                                                       const char *domain) {
             Payload *payload = (Payload *) p;
-            payload->cb(index);
+            payload->cb(index, variant, domain);
         });
     }
 }
@@ -1661,6 +1661,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
         }
 
         {
+            // TODO: single traverse
             ADScopeContext ad_scope(drjit::ADScope::Resume, 0, nullptr, 0,
                                     true);
             in_variables.assign_with_registry(input);
