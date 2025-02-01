@@ -281,18 +281,17 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
     if (tp)
         layout.type = nb::borrow<nb::type_object>(tp);
 
-    VarInfo info = jit_set_backend(index);
-
     int rv = 0;
-    if (ctx.schedule_force)
+    if (ctx.schedule_force){
         // Returns owning reference
         index = jit_var_schedule_force(index, &rv);
-    else{
+    } else {
         // Schedule and create owning reference
         rv = jit_var_schedule(index);
         jit_var_inc_ref(index);
     }
 
+    VarInfo info = jit_set_backend(index);
     if (info.state == VarState::Literal) {
         // Special case, where the variable is a literal. This should not
         // occur, as all literals are made opaque in beforehand, however it
@@ -315,28 +314,29 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
  */
 uint32_t FlatVariables::construct_jit_index(uint32_t prev_index) {
     Layout &layout = this->layout[layout_index++];
-    VarLayout &var_layout = this->var_layout[layout.index];
 
     uint32_t index;
+    VarType vt;
     if (layout.flags & (uint32_t) LayoutFlag::Literal) {
         index = jit_var_literal(this->backend, layout.vt, &layout.literal,
                                 layout.index);
-
+        vt    = layout.vt;
     } else {
+        VarLayout &var_layout = this->var_layout[layout.index];
         index = this->variables[layout.index];
         jit_log(LogLevel::Debug, "    uses output[%u] = r%u", layout.index,
                 index);
 
         jit_var_inc_ref(index);
+        vt = var_layout.vt;
     }
 
     if (prev_index) {
-        if (var_layout.vt != (VarType) jit_var_type(prev_index))
+        if (vt != (VarType) jit_var_type(prev_index))
             jit_fail("VarType missmatch %u != %u while assigning (r%u) "
                      "-> (r%u)!",
-                     (uint32_t) var_layout.vt,
-                     (uint32_t) jit_var_type(prev_index), (uint32_t) prev_index,
-                     (uint32_t) index);
+                     (uint32_t) vt, (uint32_t) jit_var_type(prev_index),
+                     (uint32_t) prev_index, (uint32_t) index);
     }
     return index;
 }
@@ -1689,21 +1689,25 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
                                     true);
             // Evaluate input variables, forcing evaluation of undefined
             // variables
-            {
-                ProfilerPhase profiler("evaluate input");
-                deep_make_opaque(input, true, true);
-            }
-            {
-                nb::gil_scoped_release guard;
-                jit_eval();
-            }
+            // {
+            //     ProfilerPhase profiler("evaluate input");
+            //     deep_make_opaque(input, true, true);
+            // }
+            // {
+            //     nb::gil_scoped_release guard;
+            //     jit_eval();
+            // }
 
             // Traverse input variables
             ProfilerPhase profiler("traverse input");
-            jit_log(LogLevel::Debug, "freeze(): Traversing input.");
+            jit_log(LogLevel::Info, "freeze(): Traversing input");
             TraverseContext ctx;
             ctx.schedule_force = true;
             in_variables.traverse_with_registry(input, ctx);
+            { // Eval the variables, scheduled when traversing
+                nb::gil_scoped_release guard;
+                jit_eval();
+            }
             in_variables.record_jit_indices();
             // In order to prevent issues with scattering, we borrow all input
             // variables, incrementing their refcount.
