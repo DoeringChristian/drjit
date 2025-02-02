@@ -289,7 +289,7 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
         layout.type = nb::borrow<nb::type_object>(tp);
 
     int rv = 0;
-    if (ctx.schedule_force){
+    if (ctx.schedule_force) {
         // Returns owning reference
         index = jit_var_schedule_force(index, &rv);
     } else {
@@ -535,7 +535,7 @@ void FlatVariables::assign_ad_var(Layout &layout, nb::handle dst) {
  */
 void FlatVariables::traverse_cb(const drjit::TraversableBase *traversable,
                                 TraverseContext &ctx, nb::object type) {
-    ProfilerPhase profiler(traversable);
+    // ProfilerPhase profiler(traversable);
 
     uint32_t layout_index = this->layout.size();
     Layout &layout        = this->layout.emplace_back();
@@ -1258,8 +1258,23 @@ nb::object FunctionRecording::record(nb::callable func,
             (uint32_t) out_variables.backend, (uint32_t) backend);
     }
 
-    recording = jit_freeze_stop(backend, out_variables.variables.data(),
-                                out_variables.variables.size());
+    // Exceptions, thrown by the recording functions will be recorded and
+    // re-thrown when calling ``jit_freeze_stop``. Since the output variables
+    // are borrowed, we have to release them in that case, and catch these
+    // exceptions.
+    try {
+        recording = jit_freeze_stop(backend, out_variables.variables.data(),
+                                    out_variables.variables.size());
+    } catch (nb::python_error &e) {
+        out_variables.release();
+        nb::raise_from(e, PyExc_RuntimeError,
+                       "record(): error encountered while recording a function "
+                       "(see above).");
+    } catch (const std::exception &e) {
+        out_variables.release();
+        nb::chain_error(PyExc_RuntimeError, "record(): %s", e.what());
+        nb::raise_python_error();
+    }
 
     jit_log(LogLevel::Info, "Recording done (n_outputs=%u)",
             out_variables.variables.size());
