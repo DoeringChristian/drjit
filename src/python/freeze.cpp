@@ -1428,9 +1428,6 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
                  "freeze(): Cannot infer backend without providing input "
                  "variable to frozen function!");
 
-        // uint32_t flags = jit_flags();
-        // auto key       = std::make_shared<FlatVariables>(
-        //     RecordingKey(in_variables.layout, in_variables.var_layout, flags));
         auto it = this->recordings.find(in_variables);
 
         if (it == this->recordings.end()) {
