@@ -1542,7 +1542,6 @@ def test37_with_dataclass_in_out(t):
 
 @pytest.test_arrays("float32, jit, shape=(*)")
 def test38_allocated_scratch_buffer(t):
-    # FIX: leaks types, memory and variables
     """
     Frozen functions may want to allocate some scratch space, scatter to it
     in a first kernel, and read / use the values later on. As long as the
@@ -2620,7 +2619,6 @@ def test65_assign_tensor(t):
 
 # @pytest.test_arrays("float32, jit, diff, shape=(*)")
 # def test42_raise(t):
-#     # FIX: leaks variables
 #
 #     def func(x):
 #         # return t(1, 2, 3) + x
