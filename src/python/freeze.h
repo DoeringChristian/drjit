@@ -29,6 +29,7 @@ enum class LayoutFlag : uint32_t {
     SingletonArray = (1 << 0),
     /// Whether this variable is unaligned in memory
     Unaligned = (1 << 1),
+    /// Whether this layout represents a literal variable
     Literal   = (1 << 2),
     /// Whether this variable has gradients enabled
     GradEnabled = (1 << 3),
@@ -50,6 +51,8 @@ struct Layout {
     /// The index in the flat_variables array of this variable.
     /// This can be used to determine aliasing.
     uint32_t index = 0;
+
+    /// Flags, storing information about variables and literals.
     uint32_t flags = 0;
 
     /// The literal data
@@ -76,11 +79,22 @@ struct Layout {
     Layout &operator=(Layout &&) = default;
 };
 
+/**
+ * \brief Stores information about opaque variables.
+ *
+ * When traversing a PyTree, literal variables are stored directly and
+ * non-literal variables are first scheduled and their indices deduplicated and
+ * added to the ``FlatVariables::variables`` field. After calling ``jit_eval``,
+ * information about variables can be recorded using
+ * ``FlatVariables::record_jit_variables``. This struct stores that information
+ * per deduplicated variable.
+ */
 struct VarLayout{
     /// Optional drjit type of the variable
     VarType vt = VarType::Void;
     /// Optional evaluation state of the variable
     VarState vs = VarState::Invalid;
+    /// Flags, storing information about variables
     uint32_t flags = 0;
     /// We have to track the condition, where two variables have the same size
     /// during recording but don't when replaying.
@@ -142,8 +156,8 @@ struct FlatVariables {
     std::vector<std::string> domains;
 
     /**
-     * Describes how many elements in the ``layout``, ``index_to_slot`` and
-     * ``size_to_slot`` containers should be reserved.
+     * Describes how many elements have to be pre-allocated for the ``layout``,
+     * ``index_to_slot`` and ``size_to_slot`` containers.
      */
     struct Heuristic {
         size_t layout        = 0;
@@ -204,6 +218,10 @@ struct FlatVariables {
      */
     void record_jit_variables();
 
+    /**
+     * Returns a struct representing heuristics to pre-allocate memory for the
+     * layout, of the flat variables.
+     */
     Heuristic heuristic() {
         return Heuristic{
             layout.size(),
@@ -355,29 +373,6 @@ struct FlatVariables {
                this->var_layout == rhs.var_layout && this->flags == rhs.flags;
     }
 };
-
-// struct RecordingKey {
-//     std::vector<Layout> layout;
-//     std::vector<VarLayout> var_layout;
-//     uint32_t flags;
-//
-//     RecordingKey() {}
-//     RecordingKey(std::vector<Layout> layout, std::vector<VarLayout> var_layout,
-//                  uint32_t flags)
-//         : layout(std::move(layout)), var_layout(std::move(var_layout)),
-//           flags(flags) {}
-//
-//     RecordingKey(const RecordingKey &)          = delete;
-//     RecordingKey &operator=(const RecordingKey) = delete;
-//
-//     RecordingKey(RecordingKey &&)            = default;
-//     RecordingKey &operator=(RecordingKey &&) = default;
-//
-//     bool operator==(const RecordingKey &rhs) const {
-//         return this->layout == rhs.layout &&
-//                this->var_layout == rhs.var_layout && this->flags == rhs.flags;
-//     }
-// };
 
 struct FlatVariablesHasher {
     size_t operator()(const std::shared_ptr<FlatVariables> &key) const;
