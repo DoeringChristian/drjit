@@ -193,13 +193,16 @@ struct FlatVariables {
     }
 
     /**
+     * \brief Records information about jit variables, that have been traversed.
+     *
      * After traversing the PyTree, collecting non-literal indices in
      * ``variables`` and evaluating the collected indices, we can collect
-     * information about the underlying variables that has to be used in the
-     * RecordingKey. This function iterates over the collected indices and
-     * collects that information.
+     * information about the underlying variables. This information is used in
+     * the key of the ``RecordingMap`` to determine which recording should be
+     * replayed or if the function has to be re-traced. This function iterates
+     * over the collected indices and collects that information.
      */
-    void record_jit_indices();
+    void record_jit_variables();
 
     Heuristic heuristic() {
         return Heuristic{
@@ -376,11 +379,11 @@ struct FlatVariables {
 //     }
 // };
 
-struct RecordingKeyHasher {
+struct FlatVariablesHasher {
     size_t operator()(const std::shared_ptr<FlatVariables> &key) const;
 };
 
-struct RecordingKeyEqual{
+struct FlatVariablesEqual{
     using is_transparent = void;
     bool operator()(const std::shared_ptr<FlatVariables> &lhs,
                     const std::shared_ptr<FlatVariables> &rhs) const {
@@ -429,7 +432,7 @@ struct FunctionRecording {
 
 using RecordingMap = tsl::robin_map<std::shared_ptr<FlatVariables>,
                                     std::unique_ptr<FunctionRecording>,
-                                    RecordingKeyHasher, RecordingKeyEqual>;
+                                    FlatVariablesHasher, FlatVariablesEqual>;
 
 } // namespace detail
 

@@ -204,13 +204,16 @@ uint32_t FlatVariables::add_variable_index(uint32_t index) {
 }
 
 /**
+ * \brief Records information about jit variables, that have been traversed.
+ *
  * After traversing the PyTree, collecting non-literal indices in
  * ``variables`` and evaluating the collected indices, we can collect
- * information about the underlying variables that has to be used in the
- * RecordingKey. This function iterates over the collected indices and
- * collects that information.
+ * information about the underlying variables. This information is used in
+ * the key of the ``RecordingMap`` to determine which recording should be
+ * replayed or if the function has to be re-traced. This function iterates
+ * over the collected indices and collects that information.
  */
-void FlatVariables::record_jit_indices() {
+void FlatVariables::record_jit_variables() {
     assert(variables.size() == var_layout.size());
     for (uint32_t i = 0; i < var_layout.size(); i++){
         uint32_t index = variables[i];
@@ -1153,7 +1156,7 @@ inline void hash_combine(size_t &seed, size_t value) {
 }
 
 size_t
-RecordingKeyHasher::operator()(const std::shared_ptr<FlatVariables> &key) const {
+FlatVariablesHasher::operator()(const std::shared_ptr<FlatVariables> &key) const {
     ProfilerPhase profiler("hash");
     // Hash the layout
     // NOTE: string hashing seems to be less efficient
@@ -1241,7 +1244,7 @@ nb::object FunctionRecording::record(nb::callable func,
             jit_eval();
         }
 
-        out_variables.record_jit_indices();
+        out_variables.record_jit_variables();
     }
 
     jit_freeze_pause(backend);
@@ -1404,7 +1407,7 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
                 jit_eval();
             }
 
-            in_variables->record_jit_indices();
+            in_variables->record_jit_variables();
             // In order to prevent issues with scattering, we borrow all input
             // variables, incrementing their refcount.
             // NOTE: already borrowed
