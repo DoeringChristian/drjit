@@ -31,7 +31,7 @@ struct ProfilerPhase {
         jit_log(LogLevel::Debug, "profiler start: %s", message);
 // #if defined(DRJIT_ENABLE_NVTX)
         jit_profile_range_push(message);
-#endif
+// #endif
     }
 
     ProfilerPhase(const drjit::TraversableBase *traversable) {
@@ -267,29 +267,54 @@ void FlatVariables::record_jit_variables() {
 
 void FlatVariables::schedule_jit_variables(TraverseContext &ctx){
     ProfilerPhase profiler("schedule_jit_variables()");
-    for (; layout_index < layout.size(); layout_index++) {
-        Layout &layout = this->layout[layout_index];
+
+    std::vector<uint32_t> indices;
+
+    {
+        ProfilerPhase profiler("push indices");
+        for (uint32_t i = layout_index; i < layout.size(); i++) {
+            Layout &layout = this->layout[i];
+            if (!(layout.flags & (uint32_t) LayoutFlag::JitIndex))
+                continue;
+            indices.push_back(layout.index);
+        }
+    }
+
+    int rv;
+    if(ctx.schedule_force){
+        ProfilerPhase profiler("schedule force");
+        rv = jit_freeze_schedule_force(indices.size(), indices.data());
+    }else{
+        ProfilerPhase profiler("schedule");
+        rv = jit_freeze_schedule(indices.size(), indices.data());
+    }
+
+    std::vector<VarInfo> infos;
+    {
+        ProfilerPhase profiler("alloc infos");
+        infos.resize(indices.size());
+    }
+    {
+        ProfilerPhase profiler("var infos");
+        jit_freeze_var_infos(indices.size(), indices.data(), infos.data());
+    }
+
+    uint32_t j = 0;
+    for (uint32_t i = layout_index; i < layout.size(); i++) {
+        Layout &layout = this->layout[i];
         if (!(layout.flags & (uint32_t) LayoutFlag::JitIndex))
             continue;
-        uint32_t index = layout.index;
+        uint32_t index = indices[j];
 
-        int rv = 0;
-        if (ctx.schedule_force) {
-            // Returns owning reference
-            index = jit_var_schedule_force(index, &rv);
-        } else {
-            // Schedule and create owning reference
-            rv = jit_var_schedule(index);
-            jit_var_inc_ref(index);
-        }
-
-        VarInfo info = jit_set_backend(index);
+        VarInfo info = infos[j];
+        // VarInfo info = jit_set_backend(index);
         if (info.state == VarState::Literal) {
-            // Special case, where the variable is a literal. This should not
-            // occur, as all literals are made opaque in beforehand, however it
-            // is nice to have a fallback.
+            // Special case, where the variable is a literal. This should
+            // not occur, as all literals are made opaque in beforehand,
+            // however it is nice to have a fallback.
             layout.literal = info.literal;
-            // Store size in index variable, as this is not used for literals
+            // Store size in index variable, as this is not used for
+            // literals
             layout.index = info.size;
             layout.vt    = info.type;
 
@@ -298,7 +323,10 @@ void FlatVariables::schedule_jit_variables(TraverseContext &ctx){
             layout.index = this->add_jit_index(index);
         }
         jit_var_dec_ref(index);
+        j++;
     }
+
+    layout_index = layout.size();
 }
 
 /**
