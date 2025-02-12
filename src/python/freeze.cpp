@@ -29,7 +29,7 @@ struct ProfilerPhase {
     std::string m_message;
     ProfilerPhase(const char *message) : m_message(message) {
         jit_log(LogLevel::Debug, "profiler start: %s", message);
-#if defined(DRJIT_ENABLE_NVTX)
+// #if defined(DRJIT_ENABLE_NVTX)
         jit_profile_range_push(message);
 #endif
     }
@@ -46,9 +46,9 @@ struct ProfilerPhase {
     }
 
     ~ProfilerPhase() {
-#if defined(DRJIT_ENABLE_NVTX)
+// #if defined(DRJIT_ENABLE_NVTX)
         jit_profile_range_pop();
-#endif
+// #endif
         jit_log(LogLevel::Debug, "profiler end: %s", m_message.c_str());
     }
 };
@@ -224,6 +224,7 @@ uint32_t FlatVariables::add_jit_index(uint32_t index) {
  * over the collected indices and collects that information.
  */
 void FlatVariables::record_jit_variables() {
+    ProfilerPhase profiler("record_jit_variables");
     assert(variables.size() == var_layout.size());
     for (uint32_t i = 0; i < var_layout.size(); i++){
         uint32_t index = variables[i];
@@ -261,6 +262,42 @@ void FlatVariables::record_jit_variables() {
             jit_raise("collect(): found variable %u in unsupported state %u!",
                       index, (uint32_t) info.state);
         }
+    }
+}
+
+void FlatVariables::schedule_jit_variables(TraverseContext &ctx){
+    ProfilerPhase profiler("schedule_jit_variables()");
+    for (; layout_index < layout.size(); layout_index++) {
+        Layout &layout = this->layout[layout_index];
+        if (!(layout.flags & (uint32_t) LayoutFlag::JitIndex))
+            continue;
+        uint32_t index = layout.index;
+
+        int rv = 0;
+        if (ctx.schedule_force) {
+            // Returns owning reference
+            index = jit_var_schedule_force(index, &rv);
+        } else {
+            // Schedule and create owning reference
+            rv = jit_var_schedule(index);
+            jit_var_inc_ref(index);
+        }
+
+        VarInfo info = jit_set_backend(index);
+        if (info.state == VarState::Literal) {
+            // Special case, where the variable is a literal. This should not
+            // occur, as all literals are made opaque in beforehand, however it
+            // is nice to have a fallback.
+            layout.literal = info.literal;
+            // Store size in index variable, as this is not used for literals
+            layout.index = info.size;
+            layout.vt    = info.type;
+
+            layout.flags |= (uint32_t) LayoutFlag::Literal;
+        } else {
+            layout.index = this->add_jit_index(index);
+        }
+        jit_var_dec_ref(index);
     }
 }
 
@@ -303,35 +340,12 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
                                        nb::handle tp) {
     (void) ctx;
     Layout &layout = this->layout.emplace_back();
+    layout.flags = (uint32_t) LayoutFlag::JitIndex;
 
     if (tp)
         layout.type = nb::borrow<nb::type_object>(tp);
 
-    int rv = 0;
-    if (ctx.schedule_force) {
-        // Returns owning reference
-        index = jit_var_schedule_force(index, &rv);
-    } else {
-        // Schedule and create owning reference
-        rv = jit_var_schedule(index);
-        jit_var_inc_ref(index);
-    }
-
-    VarInfo info = jit_set_backend(index);
-    if (info.state == VarState::Literal) {
-        // Special case, where the variable is a literal. This should not
-        // occur, as all literals are made opaque in beforehand, however it
-        // is nice to have a fallback.
-        layout.literal = info.literal;
-        // Store size in index variable, as this is not used for literals
-        layout.index = info.size;
-        layout.vt    = info.type;
-
-        layout.flags |= (uint32_t) LayoutFlag::Literal;
-    } else {
-        layout.index = this->add_jit_index(index);
-    }
-    jit_var_dec_ref(index);
+    layout.index = index;
 }
 
 /**
@@ -408,7 +422,7 @@ void FlatVariables::traverse_ad_index(uint64_t index, TraverseContext &ctx,
         traverse_jit_index((uint32_t) index, ctx, tp);
         uint32_t grad = ad_grad(index);
         traverse_jit_index(grad, ctx, tp);
-        jit_var_dec_ref(grad);
+        ctx.free_list.push_back(grad);
     } else {
         traverse_jit_index(index, ctx, tp);
     }
@@ -994,6 +1008,7 @@ void FlatVariables::assign(nb::handle dst) {
  * additional data to vcalls is tracked correctly.
  */
 void FlatVariables::traverse_with_registry(nb::handle h, TraverseContext &ctx) {
+    ProfilerPhase profiler("traverse_with_registry");
 
     // Traverse the handle
     traverse(h, ctx);
@@ -1243,10 +1258,17 @@ nb::object FunctionRecording::record(nb::callable func,
 
         TraverseContext ctx;
         ctx.postponed = &postponed;
+
         ctx.schedule_force = false;
         out_variables.traverse(output, ctx);
+        out_variables.schedule_jit_variables(ctx);
+
         ctx.schedule_force = true;
         out_variables.traverse_with_registry(input, ctx);
+        out_variables.schedule_jit_variables(ctx);
+
+        out_variables.layout_index = 0;
+
 
         { // Evaluate the variables, scheduled when traversing
             nb::gil_scoped_release guard;
@@ -1410,6 +1432,8 @@ nb::object FrozenFunction::operator()(nb::args args, nb::kwargs kwargs) {
             TraverseContext ctx;
             ctx.schedule_force = true;
             in_variables->traverse_with_registry(input, ctx);
+            in_variables->schedule_jit_variables(ctx);
+            in_variables->layout_index = 0;
 
             { // Evaluate the variables, scheduled when traversing
                 nb::gil_scoped_release guard;

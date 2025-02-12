@@ -37,6 +37,7 @@ enum class LayoutFlag : uint32_t {
     /// Did this variable have gradient edges attached when recording, that
     /// where postponed by the ``isolate_grad`` function?
     Postponed = (1 << 4),
+    JitIndex = (1 << 5),
 };
 
 /// Stores information about python objects, such as their type, their number of
@@ -119,6 +120,7 @@ struct TraverseContext {
     /// Set of postponed ad nodes, used to mark inputs to functions.
     const tsl::robin_set<uint32_t, UInt32Hasher> *postponed = nullptr;
     bool schedule_force                                     = false;
+    index64_vector free_list;
 };
 
 /**
@@ -234,6 +236,8 @@ struct FlatVariables {
      * over the collected indices and collects that information.
      */
     void record_jit_variables();
+
+    void schedule_jit_variables(TraverseContext &ctx);
 
     /**
      * Returns a struct representing heuristics to pre-allocate memory for the
