@@ -3307,3 +3307,41 @@ def test87_tensor_indexing(t, auto_opaque):
 
     assert frozen.n_recordings == 1
 
+
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
+@pytest.mark.parametrize("auto_opaque", [False, True])
+def test88_grad_doc(t, auto_opaque):
+    """
+    Tests the code snippet from the docs section on gradients.
+    """
+
+    @dr.freeze
+    def func(y):
+      # Some differentiable operation...
+      z = dr.mean(y)
+      # Propagate the gradients to the input of the function...
+      dr.backward(z)
+
+    x = dr.arange(t, 3)
+    dr.enable_grad(x)
+
+    y = dr.square(x)
+
+    # The first time the function is called, it will be recorded and the correct
+    # gradients will be accumulated into x.
+    func(y)
+
+    # Compare against manually calculated gradient
+    assert dr.allclose(dr.grad(x), 2 * 1 / dr.width(x) * x)
+
+    dr.clear_grad(x)
+
+    y = x * 2
+
+    # On subsequent calls the the function will be replayed, and gradients will
+    # be accumulated in x.
+    func(y)
+
+    # Compare against manually calculated gradient
+    assert dr.allclose(dr.grad(x), [2 * 1 / dr.width(x)] * dr.width(x))
+

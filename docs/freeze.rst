@@ -157,6 +157,52 @@ of ``MyClass`` expects a variable.
 Gradient Propagation
 --------------------
 
+Very often tracing the backward pass of an AD-attached computation is at least
+as complex as the forward pass, and caching both the tracing and assembly steps
+is desireable. Therefore, the :py:func:`drjit.freeze` decorator supports
+propagating gradients to the inputs of the function. However, it is not yet
+supported to propagate gradients from the result of a frozen function backwards
+through the function. In terms of autodiff, anotating a function with the
+:py:func:`dr.freeze` decorator is equivalent to wrapping the content with an
+isolated gradient scope.
+
+.. code-block:: python
+
+   @dr.freeze
+   def func(y):
+      # Some differentiable operation...
+      z = dr.mean(y)
+      # Propagate the gradients to the input of the function...
+      dr.backward(z)
+
+   x = dr.arange(Float, 3)
+   dr.enable_grad(x)
+
+   y = dr.square(x)
+
+   # The first time the function is called, it will be recorded and the correct
+   # gradients will be accumulated into x.
+   func(y)
+
+   y = x * 2
+
+   # On subsequent calls the the function will be replayed, and gradients will
+   # be accumulated in x.
+   func(y)
+
+The :py:func:`drjit.freeze` decorator adds an implicit
+:py:func:`drjit.isolate_grad` context to the function. The above function is
+then equivalent to the following function.
+
+.. code-block:: python
+
+   def func(y):
+      with dr.isolate_grad():
+         # Some differentiable operation...
+         z = dr.mean(y)
+         # Propagate the gradients to the input of the function...
+         dr.backward(z)
+
 Unsupported Operations
 ----------------------
 
@@ -229,6 +275,7 @@ supported.
 ..code-block:: cpp
 
    # This pattern is not supported inside of frozen functions.
+
    UInt32::load_(x.data() + 4)
 
 This pattern might be used in C++ code called by the frozen function and can
