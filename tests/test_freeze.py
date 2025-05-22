@@ -3281,3 +3281,29 @@ def test86_nested_vcalls(t, auto_opaque):
 
     assert frozen.n_recordings == 1
 
+@pytest.test_arrays("float32, jit, diff, shape=(*)")
+@pytest.mark.parametrize("auto_opaque", [False, True])
+def test87_tensor_indexing(t, auto_opaque):
+    """
+    Tests that changes in the first dimension of a tensor do not cause re-tracing.
+    """
+    mod = sys.modules[t.__module__]
+
+    def func(x: mod.TensorXf, row: mod.UInt32, col: mod.UInt32):
+        return dr.gather(mod.Float, x.array, row * dr.shape(x)[1] + col)
+
+    frozen = dr.freeze(func, auto_opaque = auto_opaque)
+
+    for i in range(3):
+        shape = ((i + 4), 10)
+        x = mod.TensorXf(dr.arange(mod.Float, dr.prod(shape)), shape = shape)
+        row = dr.arange(mod.UInt32, i+3)
+        col = dr.arange(mod.UInt32, i+3) + 1
+
+        res = frozen(x, row, col)
+        ref = func(x, row, col)
+
+        assert dr.allclose(res, ref)
+
+    assert frozen.n_recordings == 1
+
