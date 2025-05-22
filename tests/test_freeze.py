@@ -3345,3 +3345,26 @@ def test88_grad_doc(t, auto_opaque):
     # Compare against manually calculated gradient
     assert dr.allclose(dr.grad(x), [2 * 1 / dr.width(x)] * dr.width(x))
 
+
+@pytest.test_arrays("float32, jit, shape=(*)")
+@pytest.mark.parametrize("auto_opaque", [False, True])
+def test90_custom_fn(t, auto_opaque):
+    n = 3
+
+    def func(x):
+        x = x + 1
+
+        x = dr.custom_fn(lambda x: x + 1, x)
+
+        return x + 1
+
+    frozen = dr.freeze(func)
+
+    for i in range(n):
+        x = dr.arange(t, i + 3)
+
+        res = frozen(x)
+        ref = func(x)
+
+        assert dr.allclose(res, ref)
+
