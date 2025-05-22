@@ -6,8 +6,11 @@ Function Freezing
 =================
 
 This feature is still experimental, and we list a number of unsupported cases
-in the :ref:`pitfalls` section. If you encounter any issues please feel free to
-open an issue `here <https://github.com/mitsuba-renderer/drjit/issues>`__.
+in the :ref:`pitfalls` section. This feature also only supports a subset of the
+operations, that can be performed with Dr.Jit, we list them in the
+:ref:`unsupported_operations` section. If you encounter any issues please feel
+free to open an issue `here
+<https://github.com/mitsuba-renderer/drjit/issues>`__.
 
 Introduction
 ------------
@@ -23,16 +26,19 @@ default using a hash of the assembled IR code. As mentioned in the :ref:`_eval`
 page, changing literal values can cause re-compilation of the kernel and result
 in a significant performance bottleneck. However, the first two steps of
 tracing the Python code and generating the intermediary representation can
-still be expensive. This feature tries to address this performance bottleneck,
-by introducing the :py:func:`drjit.freeze` decorator. If a function is
-annotated with this decorator, Dr.Jit will try to cache the tracing and
-assembly steps as well. When a frozen function is called the first time, Dr.Jit
-will analyze the inputs, and then trace the function once, capturing all
-kernels lauched. On subsequent calls to the function Dr.Jit will try to find
-previous recordings with compatible input layouts. If such a recording is
-found, it will be launched instead of re-tracing the function. This skips
-tracing and assembly of kernels, as well as compilation, reducing the time
-spent not executing kernels.
+still be expensive. When a lot of Python code has to be traced, such as custom
+Python functions, the GIL has to be locked multiple times. Similarely, when
+tracing virtual function calls of many instances of custom plugins, these
+functions can cause a large performance overhead. This feature tries to address
+this performance bottleneck, by introducing the :py:func:`drjit.freeze`
+decorator. If a function is annotated with this decorator, Dr.Jit will try to
+cache the tracing and assembly steps as well. When a frozen function is called
+the first time, Dr.Jit will analyze the inputs, and then trace the function
+once, capturing all kernels lauched. On subsequent calls to the function Dr.Jit
+will try to find previous recordings with compatible input layouts. If such a
+recording is found, it will be launched instead of re-tracing the function.
+This skips tracing and assembly of kernels, as well as compilation, reducing
+the time spent not executing kernels.
 
 .. code-block:: python
 
@@ -124,11 +130,11 @@ by saving the layout of the output returned when recording the function. Since
 the output has to be constructed, only a subset of traversable variables can be
 returned from frozen functions. This includes:
 
-- JIT and AD variables
-- Dr.Jit Tensors and Arrays
-- Python lists, tuples and dictionaries
-- Dataclasses
-- ``DRJIT_STRUCT`` annotated classes with a default constructor
+- JIT and AD variables.
+- Dr.Jit Tensors and Arrays.
+- Python lists, tuples and dictionaries.
+- Dataclasses i.e. classes annotated with ``@dataclass``.
+- ``DRJIT_STRUCT`` annotated classes with a default constructor.
 
 The following example shows an unsupported return type, because the constructor
 of ``MyClass`` expects a variable.
@@ -197,17 +203,20 @@ then equivalent to the following function.
 .. code-block:: python
 
    def func(y):
+      # The isolate grad scope is added implicitly by the freezing decorator
       with dr.isolate_grad():
          # Some differentiable operation...
          z = dr.mean(y)
          # Propagate the gradients to the input of the function...
          dr.backward(z)
 
+.. _unsupported_operations:
+
 Unsupported Operations
 ----------------------
 
 Since frozen functions record kernel launches and have to be able to replay
-them later, certian operations are not supported inside frozen functions.
+them later, certian operations are not supported by them.
 
 Array Access
 ~~~~~~~~~~~~
@@ -565,6 +574,26 @@ tensor array can be calculated without involving the first dimension.
 
 Textures
 ~~~~~~~~
+
+Textures can be used inside of frozen functions for lookups, as well as for
+gradient calculations. However because they require special memory operations
+on CUDA, it is not possible to update or initialize CUDA textures inside of
+frozen functions.
+
+.. code-block:: python
+
+   @dr.freeze
+   def func(tex: Texture1f, pos: Float):
+     return tex.eval(pos)
+
+   tex = Texture1f([2], 1)
+   tex.set_value(t(0, 1))
+
+   pos = dr.arange(Float, 4) / 4
+
+   # The texture can be evaluated inside the frozen function.
+   func(tex, pos)
+
 
 Virtual Function Calls
 ~~~~~~~~~~~~~~~~~~~~~
