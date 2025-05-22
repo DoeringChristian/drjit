@@ -21,19 +21,18 @@ step can be very expensive, since the underlying compilers perform a lot of
 optimization on the intermediary code. Dr.Jit therefore caches this step by
 default using a hash of the assembled IR code. As mentioned in the :ref:`_eval`
 page, changing literal values can cause re-compilation of the kernel and result
-in a significant performance bottleneck. Memoization of compilation
-significantly reduces the overhead that otherwise would be encountered.
-However, the first two steps of tracing the Python code and generating the
-intermediary representation can still be expensive. This feature tries to
-address this performance bottleneck, by introducing the :py:func:`drjit.freeze`
-decorator. If a function is annotated with this decorator, Dr.Jit will try to
-cache the tracing and assembly steps as well. When a frozen function is called
-the first time, Dr.Jit will analyze the inputs, and then trace the
-function once, capturing all kernels lauched. On subsequent calls to the
-function Dr.Jit will try to find previous recordings with compatible input
-layouts. If such a recording is found, it will launch it instead of re-tracing
-the function. This skips tracing and assembly of kernels, as well as
-compilation, reducing the time spent not executing kernels.
+in a significant performance bottleneck. However, the first two steps of
+tracing the Python code and generating the intermediary representation can
+still be expensive. This feature tries to address this performance bottleneck,
+by introducing the :py:func:`drjit.freeze` decorator. If a function is
+annotated with this decorator, Dr.Jit will try to cache the tracing and
+assembly steps as well. When a frozen function is called the first time, Dr.Jit
+will analyze the inputs, and then trace the function once, capturing all
+kernels lauched. On subsequent calls to the function Dr.Jit will try to find
+previous recordings with compatible input layouts. If such a recording is
+found, it will be launched instead of re-tracing the function. This skips
+tracing and assembly of kernels, as well as compilation, reducing the time
+spent not executing kernels.
 
 .. code-block:: python
 
@@ -63,22 +62,22 @@ How Function Freezing Works
 
 Every time the function is called, the input is analyzed and all JIT variables
 are extracted into a flat-deduplicated array. Additionally, a key of the layout
-in which the variables where stored in the input is generated. The key is used
-to find recordings of previous calls to the function in a hashmap. If none are
-found, the inner function is called and the backend is put into a recording
-mode. In this mode, all device level operations, such as kernel launches are
-record. When the function is called again, the input is traversed, and the
-layout is used to lookup compatible recordings. If such a recording is found,
-it is used to replay the kernel launches.
+in which the variables where stored is generated. The key is used to find
+recordings of previous calls to the function in a hashmap. If none are found,
+the inner function is called and the backend is put into a recording mode. In
+this mode, all device level operations, such as kernel launches are record.
+When the function is called again, the input is traversed, and the layout is
+used to lookup compatible recordings. If such a recording is found, it is used
+to replay the kernel launches.
 
 Traversal
 ~~~~~~~~~
 
 In order to map the variables provided to a frozen function in its inputs to
-the to the kernel slots, Dr.Jit has to be able to traverse the input of the
-function. In addition to basic python containers such as lists, tuples and
-dictionaries, the following containers are traversable and can be part of the
-input of a frozen function.
+the kernel slots, Dr.Jit has to be able to traverse the input of the function.
+In addition to basic python containers such as lists, tuples and dictionaries,
+the following containers are traversable and can be part of the input of a
+frozen function.
 
 *Dataclasses* are traversable by Dr.Jit and their fields are automatically made
 visible to the traversal algorithm.
@@ -104,8 +103,10 @@ traversable.
          "x": Float
       }
 
-Classes inheriting from trampoline classes are automatically traversed. This is
-useful when implementing your own subclasses with vcalls.
+C++ classes such as scenes might additionally expose an interface to make them
+traversable. Python classes, inehriting from these classes through trampolines
+are automatically traversed. This is useful when implementing your own
+subclasses with vcalls.
 
 .. code-block:: python
 
@@ -114,6 +115,47 @@ useful when implementing your own subclasses with vcalls.
    class MyClass(BSDF):
       x: Float
 
+Output Construction
+~~~~~~~~~~~~~~~~~~~
+
+After a frozen function has been replayed, the outputs of the function have to
+be constructed from a flat array of JIT variable indices. This is accomplished
+by saving the layout of the output returned when recording the function. Since
+the output has to be constructed, only a subset of traversable variables can be
+returned from frozen functions. This includes:
+
+- JIT and AD variables
+- Dr.Jit Tensors and Arrays
+- Python lists, tuples and dictionaries
+- Dataclasses
+- ``DRJIT_STRUCT`` annotated classes with a default constructor
+
+The following example shows an unsupported return type, because the constructor
+of ``MyClass`` expects a variable.
+
+.. code-block:: python
+
+   class MyClass:
+      x: Float
+
+      DRJIT_STRUCT = {
+         "x": Float,
+      }
+
+      def __init__(self, x):
+         self.x = x
+
+   @dr.freeze
+   def func(x):
+      return MyClass(x + 1)
+
+   # Calling the function will fail, as the output of the frozen function
+   # cannot be constructed without a default constructor.
+   x = Float(1, 2, 3)
+   func(x)
+
+Gradient Propagation
+--------------------
 
 Unsupported Operations
 ----------------------
@@ -445,10 +487,37 @@ if a JIT variable was missed.
    def outer(x):
       return inner(x)
 
-Unsupported Inputs
-~~~~~~~~~~~~~~~~~~
+Tensor Shapes
+~~~~~~~~~~~~~
 
+When a frozen function is called with a tensor, the first dimension of the
+tensor is assumed to be dynamic. It can change from one call to another without
+triggering re-tracing of the function. Changes in any other dimension will
+change the key of the function and cause it to be re-traced. This limitation
+results from the way tensors are generally indexed, where the index into the
+tensor array can be calculated without involving the first dimension.
 
+.. code-block:: python
+
+   @dr.freeze
+   def func(t: TensorXf, row, col):
+      # Indexes into the tensor array, getting the entry at (row, col)
+      return dr.gather(Float, t.array, row * dr.shape(t) [1] + col)
+
+   # The first call will record the function
+   t = TensorXf(dr.arange(Float, 10*10), shape = (10, 10))
+   func(t, UInt(1), UInt(1))
+
+   # Subsequent calls with the same trailing dimensions will be replayed
+   t = TensorXf(dr.arange(Float, 5*10), shape = (5, 10))
+   func(t, UInt(1), UInt(1))
+
+   # Changes in trailing dimensions will cause the function to be re-traced
+   t = TensorXf(dr.arange(Float, 10*5), shape = (10, 5))
+   func(t, UInt(1), UInt(1))
+
+Textures
+~~~~~~~~
 
 Virtual Function Calls
 ~~~~~~~~~~~~~~~~~~~~~
