@@ -208,15 +208,17 @@ class HashEncoding:
         self.ArrayXu = mod.ArrayXu
         self.ArrayXi = mod.ArrayXi
         self.StorageFloatXf = mod.ArrayXf16 if drjit.is_half_v(dtype) else mod.ArrayXf
+        self.Bool = mod.Bool
 
-        p = list(p)
+        if p is not None:
+            p = list(p)
 
-        if isinstance(p, list):
-            self.PositionFloat = drjit.leaf_t(p[0])
-        else:
-            self.PositionFloat = drjit.leaf_t(p)
+            if isinstance(p, list):
+                self.PositionFloat = drjit.leaf_t(p[0])
+            else:
+                self.PositionFloat = drjit.leaf_t(p)
 
-        self.PositionFloatXf = mod.ArrayXf16 if drjit.is_half_v(self.PositionFloat) else mod.ArrayXf
+            self.PositionFloatXf = mod.ArrayXf16 if drjit.is_half_v(self.PositionFloat) else mod.ArrayXf
 
     def _acc_features(self, level_i, weight, index, values: list, active):
         """
@@ -341,6 +343,7 @@ class HashGridEncoding(HashEncoding):
         else:
             self._config = HashEncodingConfig(*args, **kwargs)
 
+    @drjit.syntax
     def __call__(
         self, p: Iterable[drjit.ArrayBase], active=True
     ) -> Iterable[drjit.ArrayBase]:
@@ -353,9 +356,16 @@ class HashGridEncoding(HashEncoding):
             f" but got {drjit.shape(p)[0]}."
         )
 
-        values = [self.StorageFloat(0.0)] * self.n_features_per_level * self.n_levels
+        values = drjit.alloc_local(
+            self.StorageFloat,
+            self.n_features_per_level * self.n_levels,
+            self.StorageFloat(0.0),
+        )
+        # values = [self.StorageFloat(0.0)] * self.n_features_per_level * self.n_levels
 
-        for level_i in range(self.n_levels):
+        level_i = self.UInt32(0)
+
+        while level_i < self.n_levels:
             scale = self._grid_scale(level_i)
 
             p_offset: float = 0.0 if self.align_corners else 0.5
@@ -374,10 +384,14 @@ class HashGridEncoding(HashEncoding):
                 index = self.indexing_function(pos_grid, level_i)
                 self._acc_features(level_i, weight, index, values, active)
 
-        values = [v & active for v in values]
+            level_i += 1
+
+        values = self.StorageFloatXf(values)
+        # values = [v & active for v in values]
 
         return self.StorageFloatXf(*values)
 
+    @drjit.syntax
     def indexing_function(self, key, level_i):
         """
         This function is used to index the underlying data array of the
@@ -386,30 +400,35 @@ class HashGridEncoding(HashEncoding):
 
         scale = self._grid_scale(level_i)
         res = self._grid_resolution(scale)
-        level_offset = self._level_offsets[level_i]
-        this_level_size = self._level_offsets[level_i + 1] - level_offset
+        level_offset = drjit.gather(self.UInt32, self._level_offsets, level_i)
+        # level_offset = self._level_offsets[level_i]
+        this_level_size = drjit.gather(self.UInt32, self._level_offsets, level_i + 1) - level_offset
+        # this_level_size = self._level_offsets[level_i + 1] - level_offset
 
         indexing_primes = [1, self.UInt32(2654435761), self.UInt32(805459861)]
 
-        stride = 1
+        stride = self.UInt32(1)
         index = self.UInt32(0)
+        stop = self.Bool(False)
         for d in range(self.dimension):
-            index += key[d] * stride
-            stride *= res
+            index[~stop] += key[d] * stride
+            stride[~stop] *= res
 
-            if stride > this_level_size:
-                break
+            stop = stride > this_level_size
+            # if stride > this_level_size:
+            #     break
 
-        if this_level_size < stride:
-            index = self.UInt32(0)
-            for d in range(0, self.dimension):
-                index ^= key[d] * indexing_primes[d]
+        # if this_level_size < stride:
+        index[this_level_size < stride] = self.UInt32(0)
+        for d in range(0, self.dimension):
+            index[this_level_size < stride] ^= key[d] * indexing_primes[d]
 
         sub_grid_index = level_offset + (index % self.UInt32(this_level_size))
         return self.n_features_per_level * sub_grid_index
 
     def _alloc(self, dtype: Type[drjit.ArrayBase]):
         self.dtype = drjit.leaf_t(dtype)
+        self._init_types(None)
 
         assert (self.hashmap_size % 8) == 0, (
             f"Invalid hashmap size {self.hashmap_size}, must be a multiple of 8."
@@ -421,7 +440,7 @@ class HashGridEncoding(HashEncoding):
         offset = 0
 
         for level_i in range(self.n_levels):
-            res = self._grid_resolution(self._grid_scale(level_i))
+            res = self._grid_resolution(self._grid_scale(level_i))[0]
             stride = drjit.power(float(res), self.dimension)
 
             params_in_level = (
@@ -437,6 +456,7 @@ class HashGridEncoding(HashEncoding):
             offset += params_in_level
 
         self._level_offsets[-1] = offset
+        self._level_offsets = self.UInt32(self._level_offsets)
 
         params_size = self._level_offsets[-1] * self.n_features_per_level
         self.data = drjit.zeros(dtype, params_size)
@@ -460,7 +480,7 @@ class HashGridEncoding(HashEncoding):
 
     def _grid_resolution(self, scale) -> int:
         return (
-            int(drjit.ceil(scale))
+            self.Int32(drjit.ceil(scale))
             + (0 if self.align_corners else 1)
             + (1 if self.torchngp_compat else 0)
         )
