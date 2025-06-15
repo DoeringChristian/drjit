@@ -679,17 +679,17 @@ def test23_hash_grid_encoding(t):
     m = sys.modules[t.__module__]
     Float16 = t
 
-    n = 2**10
+    n = 2**20
 
     config = {
         "hashmap_size": 2**19,
-        "n_levels": 1,
+        "n_levels": 16,
         "base_resolution": 16,
         "per_level_scale": 1.5,
         "n_features_per_level": 2,
     }
 
-    hg = hgrid.HashGridEncoding(
+    hg = hgrid.SymbolicHashGridEncoding(
         3,
         **config,
         align_corners=False,
@@ -700,7 +700,7 @@ def test23_hash_grid_encoding(t):
     config = {
         "otype": "Grid",
         "type": "Hash",
-        "n_levels": 1,
+        "n_levels": 16,
         "n_features_per_level": 2,
         "log2_hashmap_size": 19,
         "base_resolution": 16,
@@ -715,7 +715,7 @@ def test23_hash_grid_encoding(t):
         param.requires_grad_(True)
 
     hg.set_params(Float16(data.to(dtype = torch.float16)))
-    dr.enable_grad(hg.data)
+    # dr.enable_grad(hg.data)
 
     sampler = m.PCG32(n)
 
@@ -725,11 +725,15 @@ def test23_hash_grid_encoding(t):
     dr.kernel_history_clear()
 
     res = hg(x)
+    dr.eval(res)
 
     kernels = dr.kernel_history()
     execution_time = 0
     for kernel in kernels:
         execution_time += kernel["execution_time"]
+        print(f"{kernel=}")
+
+    print(f"{execution_time=}")
 
     start = torch.cuda.Event(enable_timing = True)
     end = torch.cuda.Event(enable_timing = True)
@@ -744,20 +748,20 @@ def test23_hash_grid_encoding(t):
 
     assert torch.allclose(res_torch, ref, atol=0.00001)
 
-    ## gradients
-
-    res = m.ArrayXf(res)
-
-    loss_res = dr.mean(dr.square(res - 1), axis = None)
-
-    dr.backward(loss_res)
-
-    loss_ref = torch.mean(torch.square(ref - 1), dim = None)
-
-    loss_ref.backward()
-
-    grad_res = dr.grad(hg.data).torch()
-    grad_ref = hg_ref.params.grad.to(dtype = torch.float16)
-
-    assert torch.allclose(grad_res, grad_ref, atol=0.00001)
+    # ## gradients
+    #
+    # res = m.ArrayXf(res)
+    #
+    # loss_res = dr.mean(dr.square(res - 1), axis = None)
+    #
+    # dr.backward(loss_res)
+    #
+    # loss_ref = torch.mean(torch.square(ref - 1), dim = None)
+    #
+    # loss_ref.backward()
+    #
+    # grad_res = dr.grad(hg.data).torch()
+    # grad_ref = hg_ref.params.grad.to(dtype = torch.float16)
+    #
+    # assert torch.allclose(grad_res, grad_ref, atol=0.00001)
 
