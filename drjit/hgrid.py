@@ -240,11 +240,18 @@ class HashEncoding:
             active,
             shape=(self.n_features_per_level, drjit.width(index)),
         )
+        drjit.set_label(v, "v")
 
         for k in range(0, self.n_features_per_level):
-            values[level_i * self.n_features_per_level + k] = drjit.fma(
+            layer_result = drjit.fma(
                 v[k], weight, values[level_i * self.n_features_per_level + k]
             )
+            drjit.set_label(layer_result, "layer_result")
+            values[level_i * self.n_features_per_level + k] = layer_result
+
+            # values[level_i * self.n_features_per_level + k] = drjit.fma(
+            #     v[k], weight, values[level_i * self.n_features_per_level + k]
+            # )
 
     def indexing_function(self, key, level_i):
         raise NotImplementedError()
@@ -367,12 +374,15 @@ class HashGridEncoding(HashEncoding):
             w1 = pos - pos0
             w0 = 1.0 - w1
 
-            for offset in self._grid_offsets:
+            for i in range(len(self._grid_offsets)):
+                offset = self._grid_offsets[i]
                 pos_grid = pos0 + self.ArrayXu(offset)
                 weight = drjit.select(self.ArrayXu(offset) == 0, w0, w1)
                 weight = drjit.prod(weight, axis=0)
 
                 index = self.indexing_function(pos_grid, level_i)
+                drjit.set_label(index, f"index {level_i}, {i}")
+
                 self._acc_features(level_i, weight, index, values, active)
 
         values = [v & active for v in values]
@@ -619,8 +629,11 @@ class SymbolicHashGridEncoding(HashEncoding):
 
         level_i = self.UInt32(0)
 
-        while level_i < self.n_levels:
+        while drjit.hint(level_i < self.n_levels, mode = "symbolic"):
             scale = self._grid_scale(level_i)
+            res = self._grid_resolution(scale)
+            level_offset = drjit.gather(self.UInt32, self._level_offsets, level_i)
+            this_level_size = drjit.gather(self.UInt32, self._level_offsets, level_i + 1) - level_offset
 
             p_offset: float = 0.0 if self.align_corners else 0.5
             pos = drjit.fma(p, scale, p_offset)
@@ -630,12 +643,23 @@ class SymbolicHashGridEncoding(HashEncoding):
             w1 = pos - pos0
             w0 = 1.0 - w1
 
-            for offset in self._grid_offsets:
+            for i in range(len(self._grid_offsets)):
+                offset = self._grid_offsets[i]
                 pos_grid = pos0 + self.ArrayXu(offset)
                 weight = drjit.select(self.ArrayXu(offset) == 0, w0, w1)
                 weight = drjit.prod(weight, axis=0)
+                drjit.set_label(weight, f"weight {i}")
 
-                index = self.indexing_function(pos_grid, level_i)
+                index = self.indexing_function(
+                    pos_grid,
+                    level_i,
+                    scale,
+                    res,
+                    level_offset,
+                    this_level_size,
+                )
+                drjit.set_label(index, f"index {i}")
+
                 self._acc_features(level_i, weight, index, values, active)
 
             level_i += 1
@@ -646,18 +670,19 @@ class SymbolicHashGridEncoding(HashEncoding):
         return self.StorageFloatXf(*values)
 
     @drjit.syntax
-    def indexing_function(self, key, level_i):
+    def indexing_function(
+        self,
+        key,
+        level_i,
+        scale,
+        res,
+        level_offset,
+        this_level_size,
+    ):
         """
         This function is used to index the underlying data array of the
         hash grid given a grid position.
         """
-
-        scale = self._grid_scale(level_i)
-        res = self._grid_resolution(scale)
-        level_offset = drjit.gather(self.UInt32, self._level_offsets, level_i)
-        # level_offset = self._level_offsets[level_i]
-        this_level_size = drjit.gather(self.UInt32, self._level_offsets, level_i + 1) - level_offset
-        # this_level_size = self._level_offsets[level_i + 1] - level_offset
 
         indexing_primes = [1, self.UInt32(2654435761), self.UInt32(805459861)]
 

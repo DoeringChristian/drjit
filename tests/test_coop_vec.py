@@ -689,7 +689,7 @@ def test23_hash_grid_encoding(t):
         "n_features_per_level": 2,
     }
 
-    hg = hgrid.SymbolicHashGridEncoding(
+    hg = hgrid.HashGridEncoding(
         3,
         **config,
         align_corners=False,
@@ -723,9 +723,12 @@ def test23_hash_grid_encoding(t):
     x_torch = torch.stack([xx.torch() for xx in x], dim = 1)
 
     dr.kernel_history_clear()
+    dr.set_log_level(dr.LogLevel.Trace)
 
     res = hg(x)
     dr.eval(res)
+
+    dr.set_log_level(dr.LogLevel.Warn)
 
     kernels = dr.kernel_history()
     execution_time = 0
