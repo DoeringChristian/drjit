@@ -372,11 +372,21 @@ void FlatVariables::schedule_jit_variables(
     bool schedule_force, const drjit::vector<bool> *opaque_mask) {
 
     ProfilerPhase profiler("schedule_jit_variables");
+    // jit_log(LogLevel::Warn, "total_nodes=%u", this->layout.size());
+    uint32_t nodes = 0;
+    uint32_t evaluated = 0;
+    uint32_t literals = 0;
+    uint32_t undefined = 0;
+    tsl::robin_set<uint32_t> unique_literals;
+    tsl::robin_set<uint32_t> unique_evaluated;
+    tsl::robin_set<uint32_t> unique_undefined;
     for (uint32_t i = layout_index; i < layout.size(); i++) {
         Layout &layout = this->layout[i];
 
-        if (!(layout.flags & (uint32_t) LayoutFlag::JitIndex))
+        if (!(layout.flags & (uint32_t) LayoutFlag::JitIndex)){
+            nodes++;
             continue;
+        }
 
         uint32_t index = layout.index;
 
@@ -404,6 +414,9 @@ void FlatVariables::schedule_jit_variables(
         }
 
         if (info.state == VarState::Literal) {
+            literals++;
+            unique_literals.insert(index);
+
             // Special case, where the variable is a literal.
             layout.literal = info.literal;
             // Store size in index variable, as this is not used for literals.
@@ -413,6 +426,9 @@ void FlatVariables::schedule_jit_variables(
 
             layout.flags |= (uint32_t) LayoutFlag::Literal;
         } else if (info.state == VarState::Undefined) {
+            undefined++;
+            unique_undefined.insert(index);
+
             // Special case, where the variable is a literal.
             // Store size in index variable, as this is not used for literals.
             layout.literal_size  = info.size;
@@ -421,11 +437,24 @@ void FlatVariables::schedule_jit_variables(
 
             layout.flags |= (uint32_t) LayoutFlag::Undefined;
         } else {
+            evaluated++;
+            unique_evaluated.insert(index);
+
             layout.index = this->add_jit_index(index);
             layout.vt    = (uint32_t) info.type;
             jit_var_dec_ref(index);
         }
     }
+    // jit_log(LogLevel::Warn,
+    //         "schedule_jit_variables(): nodes=%u, evaluated=%u, literals=%u, "
+    //         "undefined=%u",
+    //         nodes, evaluated, literals, undefined);
+    // jit_log(
+    //     LogLevel::Warn,
+    //     "schedule_jit_variables(): unique_evaluated=%u, unique_literals=%u, "
+    //     "unique_undefined=%u",
+    //     unique_evaluated.size(), unique_literals.size(),
+    //     unique_undefined.size());
     layout_index = layout.size();
 }
 
@@ -510,6 +539,8 @@ uint32_t FlatVariables::add_size(uint32_t size) {
 void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
                                        nb::handle tp) {
     (void) ctx;
+    if (jit_var_state(index) == VarState::Literal)
+        return;
     Layout &layout = this->layout.emplace_back();
 
     if (tp)
@@ -529,6 +560,10 @@ void FlatVariables::traverse_jit_index(uint32_t index, TraverseContext &ctx,
  * will check for compatible variable types.
  */
 uint32_t FlatVariables::construct_jit_index(uint32_t prev_index) {
+    if (jit_var_state(prev_index) == VarState::Literal){
+        jit_var_inc_ref(prev_index);
+        return prev_index;
+    }
     Layout &layout = this->layout[layout_index++];
 
     uint32_t index;
