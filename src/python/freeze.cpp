@@ -141,9 +141,9 @@ struct ProfilerPhase {
     std::string m_message;
     ProfilerPhase(const char *message) : m_message(message) {
         jit_log(LogLevel::Debug, "profiler start: %s", message);
-#if defined(DRJIT_ENABLE_NVTX)
+// #if defined(DRJIT_ENABLE_NVTX)
         jit_profile_range_push(message);
-#endif
+// #endif
     }
 
     ProfilerPhase(const drjit::TraversableBase *traversable) {
@@ -157,9 +157,9 @@ struct ProfilerPhase {
     }
 
     ~ProfilerPhase() {
-#if defined(DRJIT_ENABLE_NVTX)
+// #if defined(DRJIT_ENABLE_NVTX)
         jit_profile_range_pop();
-#endif
+// #endif
         jit_log(LogLevel::Debug, "profiler end: %s", m_message.c_str());
     }
 };
@@ -372,19 +372,10 @@ void FlatVariables::schedule_jit_variables(
     bool schedule_force, const drjit::vector<bool> *opaque_mask) {
 
     ProfilerPhase profiler("schedule_jit_variables");
-    // jit_log(LogLevel::Warn, "total_nodes=%u", this->layout.size());
-    uint32_t nodes = 0;
-    uint32_t evaluated = 0;
-    uint32_t literals = 0;
-    uint32_t undefined = 0;
-    tsl::robin_set<uint32_t> unique_literals;
-    tsl::robin_set<uint32_t> unique_evaluated;
-    tsl::robin_set<uint32_t> unique_undefined;
     for (uint32_t i = layout_index; i < layout.size(); i++) {
         Layout &layout = this->layout[i];
 
         if (!(layout.flags & (uint32_t) LayoutFlag::JitIndex)){
-            nodes++;
             continue;
         }
 
@@ -414,8 +405,6 @@ void FlatVariables::schedule_jit_variables(
         }
 
         if (info.state == VarState::Literal) {
-            literals++;
-            unique_literals.insert(index);
 
             // Special case, where the variable is a literal.
             layout.literal = info.literal;
@@ -426,8 +415,6 @@ void FlatVariables::schedule_jit_variables(
 
             layout.flags |= (uint32_t) LayoutFlag::Literal;
         } else if (info.state == VarState::Undefined) {
-            undefined++;
-            unique_undefined.insert(index);
 
             // Special case, where the variable is a literal.
             // Store size in index variable, as this is not used for literals.
@@ -437,24 +424,12 @@ void FlatVariables::schedule_jit_variables(
 
             layout.flags |= (uint32_t) LayoutFlag::Undefined;
         } else {
-            evaluated++;
-            unique_evaluated.insert(index);
 
             layout.index = this->add_jit_index(index);
             layout.vt    = (uint32_t) info.type;
             jit_var_dec_ref(index);
         }
     }
-    // jit_log(LogLevel::Warn,
-    //         "schedule_jit_variables(): nodes=%u, evaluated=%u, literals=%u, "
-    //         "undefined=%u",
-    //         nodes, evaluated, literals, undefined);
-    // jit_log(
-    //     LogLevel::Warn,
-    //     "schedule_jit_variables(): unique_evaluated=%u, unique_literals=%u, "
-    //     "unique_undefined=%u",
-    //     unique_evaluated.size(), unique_literals.size(),
-    //     unique_undefined.size());
     layout_index = layout.size();
 }
 
@@ -1987,6 +1962,7 @@ nb::object FrozenFunction::operator()(nb::dict input) {
 
             TraverseContext ctx;
             in_variables->traverse_with_registry(input, ctx);
+            jit_log(LogLevel::Warn, "in_variables->layout.size()=%u", in_variables->layout.size());
 
             // If this is the first time the frozen function has been called or
             // the layout is not compatible with the previous one, we clear the
