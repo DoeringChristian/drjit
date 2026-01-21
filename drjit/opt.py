@@ -451,7 +451,7 @@ class Optimizer(Generic[Extra], MutableMapping[str, dr.ArrayBase]):
 
                 # Optimizer-specific step
                 value_flat = dr.detach(value).array
-                new_value, new_extra = self._step(cache, value_flat, grad, lr_v, extra)
+                new_value, new_extra = self._step(key, cache, value_flat, grad, lr_v, extra)
 
                 # Optional: mask updates to components with zero-valued gradients
                 mask = False
@@ -488,6 +488,7 @@ class Optimizer(Generic[Extra], MutableMapping[str, dr.ArrayBase]):
     # To be provided by subclasses
     def _step(
         self,
+        key: str,
         cache: "_LRCache",
         value: dr.ArrayBase,
         grad: dr.ArrayBase,
@@ -664,6 +665,7 @@ class SGD(Optimizer[Optional[dr.ArrayBase]]):
     # To be provided by subclasses
     def _step(
         self,
+        key: str,
         cache: "_LRCache",
         value: dr.ArrayBase,
         grad: dr.ArrayBase,
@@ -1012,6 +1014,7 @@ class Adam(Optimizer[Tuple[int, dr.ArrayBase, dr.ArrayBase, Optional[dr.ArrayBas
 
     def _step(
         self,
+        key: str,
         cache: "_LRCache",
         value: dr.ArrayBase,
         grad: dr.ArrayBase,
@@ -1249,6 +1252,7 @@ class AdamW(Adam):
 
     def _step(
         self,
+        key: str,
         cache: "_LRCache",
         value: dr.ArrayBase,
         grad: dr.ArrayBase,
@@ -1256,7 +1260,7 @@ class AdamW(Adam):
         extra: Tuple[int, dr.ArrayBase, dr.ArrayBase, Optional[dr.ArrayBase]],
         /,
     ) -> Tuple[dr.ArrayBase, Tuple[int, dr.ArrayBase, dr.ArrayBase, Optional[dr.ArrayBase]]]:
-        new_value, new_extra = super()._step(cache, value, grad, lr, extra)
+        new_value, new_extra = super()._step(key, cache, value, grad, lr, extra)
         scaled_value = dr.fma(value, -lr * self.weight_decay, new_value)
         return scaled_value, new_extra
 
