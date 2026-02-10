@@ -689,3 +689,55 @@ def test23_linear_layer_dtype(t):
     _ = net.alloc(TensorXf16, 2)
     with pytest.raises(TypeError, match="Linear layer requires a Tensor type"):
         _ = net.alloc(Float16, 2)
+
+
+@pytest.test_arrays("jit,shape=(*),float16,diff,cuda")
+def test24_non_power2(t):
+    dr.set_log_level(dr.LogLevel.Trace)
+    dr.set_flag(dr.JitFlag.ReuseIndices, False)
+
+    rng = dr.rng()
+    m = sys.modules[t.__module__]
+    Float16 = t
+    Float32 = m.Float32
+    TensorXf16 = m.TensorXf16
+    ArrayXf = m.ArrayXf
+
+    dr.set_flag(dr.JitFlag.PrintIR, True)
+
+    net = nn.Sequential(
+        nn.Cast(dtype=Float16),
+        nn.Linear(in_features=15, out_features=32),
+        nn.ReLU(),
+        nn.Linear(in_features=32, out_features=32),
+        nn.ReLU(),
+        nn.Linear(in_features=32, out_features=32),
+        nn.ReLU(),
+        nn.Linear(in_features=32, out_features=1),
+    )
+
+    net = net.alloc(TensorXf16)
+
+    weights, net = nn.pack(net, layout="training")
+
+    new_weights = rng.random(Float32, dr.width(weights))
+
+    weights[:] = Float16(new_weights)
+
+    print(f"{weights.index=}")
+
+    x = rng.random(ArrayXf, (15, 32))
+    dr.eval(x)
+    y = ArrayXf(net(nn.CoopVec(x)))
+    dr.eval(y)
+
+
+@pytest.test_arrays("jit,shape=(*),float16,diff")
+def test25_suspend_grad(t):
+
+    x = t(1, 2, 3)
+    y = t(2, 3, 4)
+    dr.enable_grad(y)
+    with dr.suspend_grad():
+        z = nn.CoopVec(x, y)
+

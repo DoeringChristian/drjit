@@ -3963,6 +3963,7 @@ Index ad_coop_vec_pack(uint32_t n, const Index *in) {
         tmp[i] = jit_index(index);
         attached |= ad_index(index) != 0;
     }
+    // TODO: if in suspend_grad, this should not be attached
 
     JitVar result = JitVar::steal(jit_coop_vec_pack(n, tmp));
 
